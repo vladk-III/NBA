@@ -1,7 +1,7 @@
 """Recover per-game team stats from the cumulative historical CSV.
 
 A team's pre-game average after k games is A_k, so its k-th game value is
-k * A_k - (k - 1) * A_(k-1). This lets us check that NBA CDN box scores line up
+k * A_k - (k - 1) * A_(k-1). This lets us check that ESPN box scores line up
 with the source the historical CSV was built from, game by game.
 """
 

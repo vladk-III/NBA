@@ -1,0 +1,274 @@
+{
+ "events": [
+  {
+   "id": "401900001",
+   "date": "2026-10-04T23:00Z",
+   "season": {
+    "year": 2027,
+    "type": 1
+   },
+   "competitions": [
+    {
+     "id": "401900001",
+     "date": "2026-10-04T23:00Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_FINAL",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "BOS"
+       },
+       "score": "110"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "NY"
+       },
+       "score": "100"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900010",
+   "date": "2026-10-20T23:30Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900010",
+     "date": "2026-10-20T23:30Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_FINAL",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "BOS"
+       },
+       "score": "120"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "NY"
+       },
+       "score": "110"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900011",
+   "date": "2026-10-21T02:00Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900011",
+     "date": "2026-10-21T02:00Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_FINAL",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "GS"
+       },
+       "score": "118"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "LAL"
+       },
+       "score": "115"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900012",
+   "date": "2026-10-21T23:30Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900012",
+     "date": "2026-10-21T23:30Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "NY"
+       },
+       "score": "0"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "BOS"
+       },
+       "score": "0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900013",
+   "date": "2026-10-21T23:30Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900013",
+     "date": "2026-10-21T23:30Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_POSTPONED",
+       "state": "pre",
+       "completed": false
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "MIA"
+       },
+       "score": "0"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "ORL"
+       },
+       "score": "0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900014",
+   "date": "2026-12-16T01:00Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900014",
+     "date": "2026-12-16T01:00Z",
+     "notes": [
+      {
+       "headline": "Emirates NBA Cup - Championship"
+      }
+     ],
+     "status": {
+      "type": {
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "OKC"
+       },
+       "score": "0"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "NY"
+       },
+       "score": "0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401900015",
+   "date": "2027-02-15T01:00Z",
+   "season": {
+    "year": 2027,
+    "type": 2
+   },
+   "competitions": [
+    {
+     "id": "401900015",
+     "date": "2027-02-15T01:00Z",
+     "notes": [],
+     "status": {
+      "type": {
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false
+      }
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "abbreviation": "EAST"
+       },
+       "score": "0"
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "abbreviation": "WEST"
+       },
+       "score": "0"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,12 +1,12 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from nba_pipeline import features, kalshi, merge, nba_cdn, odds
+from nba_pipeline import espn, features, kalshi, merge, odds
 from nba_pipeline.legacy import recover_game_logs
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -74,24 +74,35 @@ def test_merge_into_history_keeps_other_seasons_untouched():
     assert len(again) == len(out)
 
 
-def test_schedule_filters_preseason_and_tbd(monkeypatch):
-    monkeypatch.setattr(nba_cdn, "get_json", lambda *a, **k: (load("schedule.json"), None))
-    season, games = nba_cdn.fetch_schedule()
-    assert season == "2026-27"
-    assert [g["game_id"] for g in games] == ["0022600001", "0022600002"]
-    assert games[0]["home_points"] == 120 and games[1]["home_points"] is None
-    assert games[0]["game_date"] == "2026-10-20"
+def test_espn_schedule_filters_and_dates(monkeypatch):
+    monkeypatch.setattr(espn, "get_json", lambda *a, **k: (load("espn_scoreboard.json"), None))
+    games = {g["game_id"]: g for g in espn.fetch_games(date(2026, 10, 20), date(2026, 10, 21))}
+    # Preseason, the Cup final and All-Star teams are excluded; the Cup final is out of range anyway.
+    assert sorted(games) == ["401900010", "401900011", "401900012", "401900013"]
+    late = games["401900011"]  # 02:00 UTC is 10 PM Eastern the night before
+    assert late["game_date"] == "2026-10-20" and late["home_team_abbreviation"] == "GSW"
+    assert late["season"] == "2026-27" and late["home_points"] == 118
+    assert games["401900012"]["game_status"] == 1 and games["401900012"]["home_points"] is None
+    assert games["401900013"]["postponed"] is True
+    cup_final = load("espn_scoreboard.json")["events"][5]
+    assert espn.parse_event(cup_final) is None
 
 
-def test_parse_boxscore():
-    rows = nba_cdn.parse_boxscore(load("boxscore.json")["game"], "2026-27")
-    home, away = rows
-    assert home["team"] == "BOS" and home["is_home"] and home["win"] == 1
-    assert home["reb"] == 45 and home["tov"] == 13 and home["overtime_periods"] == 1
-    assert away["tov"] == 14  # no turnoversTotal: players + team
-    assert away["game_date"] == "2026-10-20"
-    not_final = dict(load("boxscore.json")["game"], gameStatus=2)
-    assert nba_cdn.parse_boxscore(not_final, "2026-27") is None
+def test_espn_boxscore_matches_historical_csv():
+    """ESPN's box score for 2025-26 opening night equals the stats recovered from the CSV."""
+    rows = {r["team"]: r for r in espn.parse_boxscore(load("espn_summary_401809243.json"), "2025-26")}
+    recovered = recover_game_logs(legacy_history())
+    want = recovered[recovered["game_id"] == "0022500001"].set_index("team")
+    for team in ("OKC", "HOU"):
+        for stat in ("pts", "opp_pts", "win", "reb", "dreb", "tov", "pf", "blk", "stl", "ast",
+                     "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"):
+            assert rows[team][stat] == want.at[team, stat], (team, stat)
+    assert rows["OKC"]["is_home"] and rows["OKC"]["overtime_periods"] == 2
+    assert rows["OKC"]["game_date"] == "2025-10-21" and rows["OKC"]["game_id"] == "401809243"
+
+    live = load("espn_summary_401809243.json")
+    live["header"]["competitions"][0]["status"]["type"].update(state="in", completed=False, name="STATUS_IN_PROGRESS")
+    assert espn.parse_boxscore(live, "2025-26") is None
 
 
 def test_kalshi_ticker_parsing():
@@ -186,6 +197,6 @@ def test_refuses_to_rebuild_legacy_season(tmp_path, monkeypatch):
     hist = tmp_path / "hist.csv"
     pd.read_csv(HISTORICAL, dtype={"game_id": str}).to_csv(hist, index=False)
     monkeypatch.setattr(collect_nba, "HISTORICAL_FILE", hist)
-    games = pd.DataFrame(columns=nba_cdn.GAME_COLUMNS)
+    games = pd.DataFrame(columns=espn.GAME_COLUMNS)
     with pytest.raises(RuntimeError):
-        collect_nba.rebuild_history(games, pd.DataFrame(columns=nba_cdn.LOG_COLUMNS), "2025-26", "2026-02-20")
+        collect_nba.rebuild_history(games, pd.DataFrame(columns=espn.LOG_COLUMNS), "2025-26", "2026-02-20")
