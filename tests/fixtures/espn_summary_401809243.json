@@ -1,0 +1,288 @@
+{
+ "header": {
+  "id": "401809243",
+  "season": {
+   "year": 2026,
+   "current": false,
+   "type": 2
+  },
+  "competitions": [
+   {
+    "id": "401809243",
+    "date": "2025-10-21T23:30Z",
+    "status": {
+     "type": {
+      "id": "3",
+      "name": "STATUS_FINAL",
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "detail": "Final/2OT",
+      "shortDetail": "Final/2OT",
+      "altDetail": "2OT"
+     }
+    },
+    "competitors": [
+     {
+      "homeAway": "home",
+      "score": "125",
+      "linescores": [
+       {
+        "displayValue": "27"
+       },
+       {
+        "displayValue": "24"
+       },
+       {
+        "displayValue": "24"
+       },
+       {
+        "displayValue": "29"
+       },
+       {
+        "displayValue": "11"
+       },
+       {
+        "displayValue": "10"
+       }
+      ],
+      "team": {
+       "abbreviation": "OKC"
+      }
+     },
+     {
+      "homeAway": "away",
+      "score": "124",
+      "linescores": [
+       {
+        "displayValue": "30"
+       },
+       {
+        "displayValue": "27"
+       },
+       {
+        "displayValue": "22"
+       },
+       {
+        "displayValue": "25"
+       },
+       {
+        "displayValue": "11"
+       },
+       {
+        "displayValue": "9"
+       }
+      ],
+      "team": {
+       "abbreviation": "HOU"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "boxscore": {
+  "teams": [
+   {
+    "homeAway": "away",
+    "team": {
+     "abbreviation": "HOU"
+    },
+    "statistics": [
+     {
+      "name": "fieldGoalsMade-fieldGoalsAttempted",
+      "displayValue": "43-97"
+     },
+     {
+      "name": "fieldGoalPct",
+      "displayValue": "44"
+     },
+     {
+      "name": "threePointFieldGoalsMade-threePointFieldGoalsAttempted",
+      "displayValue": "11-39"
+     },
+     {
+      "name": "threePointFieldGoalPct",
+      "displayValue": "28"
+     },
+     {
+      "name": "freeThrowsMade-freeThrowsAttempted",
+      "displayValue": "27-31"
+     },
+     {
+      "name": "freeThrowPct",
+      "displayValue": "87"
+     },
+     {
+      "name": "totalRebounds",
+      "displayValue": "52"
+     },
+     {
+      "name": "offensiveRebounds",
+      "displayValue": "16"
+     },
+     {
+      "name": "defensiveRebounds",
+      "displayValue": "36"
+     },
+     {
+      "name": "assists",
+      "displayValue": "23"
+     },
+     {
+      "name": "steals",
+      "displayValue": "6"
+     },
+     {
+      "name": "blocks",
+      "displayValue": "5"
+     },
+     {
+      "name": "turnovers",
+      "displayValue": "22"
+     },
+     {
+      "name": "teamTurnovers",
+      "displayValue": "3"
+     },
+     {
+      "name": "totalTurnovers",
+      "displayValue": "25"
+     },
+     {
+      "name": "technicalFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "totalTechnicalFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "flagrantFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "turnoverPoints",
+      "displayValue": "28"
+     },
+     {
+      "name": "fastBreakPoints",
+      "displayValue": "2"
+     },
+     {
+      "name": "pointsInPaint",
+      "displayValue": "44"
+     },
+     {
+      "name": "fouls",
+      "displayValue": "26"
+     },
+     {
+      "name": "largestLead",
+      "displayValue": "12"
+     }
+    ]
+   },
+   {
+    "homeAway": "home",
+    "team": {
+     "abbreviation": "OKC"
+    },
+    "statistics": [
+     {
+      "name": "fieldGoalsMade-fieldGoalsAttempted",
+      "displayValue": "46-104"
+     },
+     {
+      "name": "fieldGoalPct",
+      "displayValue": "44"
+     },
+     {
+      "name": "threePointFieldGoalsMade-threePointFieldGoalsAttempted",
+      "displayValue": "13-52"
+     },
+     {
+      "name": "threePointFieldGoalPct",
+      "displayValue": "25"
+     },
+     {
+      "name": "freeThrowsMade-freeThrowsAttempted",
+      "displayValue": "20-25"
+     },
+     {
+      "name": "freeThrowPct",
+      "displayValue": "80"
+     },
+     {
+      "name": "totalRebounds",
+      "displayValue": "38"
+     },
+     {
+      "name": "offensiveRebounds",
+      "displayValue": "11"
+     },
+     {
+      "name": "defensiveRebounds",
+      "displayValue": "27"
+     },
+     {
+      "name": "assists",
+      "displayValue": "29"
+     },
+     {
+      "name": "steals",
+      "displayValue": "12"
+     },
+     {
+      "name": "blocks",
+      "displayValue": "4"
+     },
+     {
+      "name": "turnovers",
+      "displayValue": "11"
+     },
+     {
+      "name": "teamTurnovers",
+      "displayValue": "1"
+     },
+     {
+      "name": "totalTurnovers",
+      "displayValue": "12"
+     },
+     {
+      "name": "technicalFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "totalTechnicalFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "flagrantFouls",
+      "displayValue": "0"
+     },
+     {
+      "name": "turnoverPoints",
+      "displayValue": "12"
+     },
+     {
+      "name": "fastBreakPoints",
+      "displayValue": "16"
+     },
+     {
+      "name": "pointsInPaint",
+      "displayValue": "50"
+     },
+     {
+      "name": "fouls",
+      "displayValue": "27"
+     },
+     {
+      "name": "largestLead",
+      "displayValue": "6"
+     }
+    ]
+   }
+  ]
+ }
+}

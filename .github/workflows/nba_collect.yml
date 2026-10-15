@@ -23,7 +23,7 @@ on:
         required: false
         default: "auto"
         type: choice
-        options: [auto, postgame, morning, closing, validate]
+        options: [auto, postgame, morning, closing, validate, probe]
       date:
         description: "Override today's date (ET), YYYY-MM-DD"
         required: false

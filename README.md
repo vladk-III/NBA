@@ -5,7 +5,7 @@ Automated pipeline that collects NBA box scores, pre-game cumulative team stats,
 ```
 Postgame (5:17 AM ET)               Morning (11:23 AM ET)            Closing (6:37 PM ET)
 ┌───────────────────────────┐       ┌──────────────────────────┐     ┌──────────────────────────┐
-│ • NBA schedule (CDN)      │       │ • Everything postgame does│     │ • Everything postgame does│
+│ • NBA schedule (ESPN)     │       │ • Everything postgame does│     │ • Everything postgame does│
 │ • Box scores of finals    │  ──▶  │ • Odds API snapshot       │ ──▶ │ • Odds API snapshot       │
 │ • Rebuild pre-game stats  │       │ • Kalshi totals snapshot  │     │ • Kalshi totals snapshot  │
 │   (incl. today's games)   │       │ • Rebuild merged table    │     │ • Rebuild merged table    │
@@ -30,9 +30,11 @@ Snapshots only cover games that have not tipped off yet. On days without games, 
 1. **Repository secrets** (Settings → Secrets and variables → Actions):
    - `ODDS_API_KEY`: [The Odds API](https://the-odds-api.com) key. The free tier (500 credits/month) is enough: each snapshot is one call costing 3 credits, so about 6 credits per game day.
    - Optional email: `EMAIL_USER`, `EMAIL_APP_PASSWORD`, `EMAIL_TO` (Gmail app password, same as the NFL repo).
-2. NBA CDN and Kalshi need no keys.
+2. ESPN and Kalshi need no keys.
 3. Scheduled workflows only run from the default branch, so the workflow must be on `main`.
-4. **One-time check:** run the workflow manually with mode `validate`. It downloads box scores for ~40 games from the 2025-26 historical CSV and compares each stat with the values recovered from that CSV, writing a table to the run summary. All rows should be at or near 100%.
+4. **Checks you can run any time** (Actions → NBA Betting Data Collector → Run workflow):
+   - `probe` reports which data sources answer from GitHub's servers.
+   - `validate` downloads ESPN box scores for ~40 games from the 2025-26 historical CSV and compares each stat with the values recovered from that CSV, writing a table to the run summary. All rows should be at or near 100%.
 
 Manual runs (Actions → NBA Betting Data Collector → Run workflow) accept a mode, a date override and `force` to retake a snapshot.
 
@@ -73,4 +75,6 @@ The model-ready table for the current season: the historical stats row, the morn
 ## Scope
 
 - Preseason, All-Star and the NBA Cup final are excluded. The Cup final doesn't count toward team records; the other Cup games are regular-season games and are included.
-- Data sources: [NBA.com static CDN](https://cdn.nba.com) (schedule, box scores), [The Odds API](https://the-odds-api.com), [Kalshi](https://kalshi.com) series `KXNBATOTAL`.
+- Data sources: [ESPN's public site API](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard) (schedule, box scores), [The Odds API](https://the-odds-api.com), [Kalshi](https://kalshi.com) series `KXNBATOTAL`.
+- NBA.com's own feeds (stats.nba.com and cdn.nba.com) refuse requests from GitHub Actions servers with HTTP 403, so they are not used. ESPN's team box scores match the original CSV's source stat for stat (rebounds = `totalRebounds`, turnovers = `turnovers`, fouls = `fouls`).
+- `game_id` is ESPN's event id for games collected by this pipeline (e.g. `401809243`); the original 2025-26 rows keep their NBA.com ids (e.g. `0022500001`).
