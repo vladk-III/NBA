@@ -1,0 +1,126 @@
+name: NBA Betting Data Collector
+
+on:
+  schedule:
+    # Odd minutes avoid GitHub's top-of-the-hour queue, where scheduled runs get
+    # delayed or dropped. Cron is UTC; ET is 4h behind in EDT, 5h in EST.
+    # ── Postgame: box scores + rebuild stats incl. today's rows ─────
+    # 09:17 UTC = 5:17 AM EDT / 4:17 AM EST, after every West Coast game is final
+    - cron: "17 9 * * *"
+    # ── Morning snapshot: odds + Kalshi (before noon ET holiday tips) ─
+    # 15:23 UTC = 11:23 AM EDT / 10:23 AM EST
+    - cron: "23 15 * * *"
+    # 16:47 UTC backup: no-op if the 15:23 run already took the snapshot
+    - cron: "47 16 * * *"
+    # ── Closing snapshot before the 7 PM ET tips ─────────────────────
+    # 22:37 UTC = 6:37 PM EDT / 5:37 PM EST
+    - cron: "37 22 * * *"
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode (auto picks from the time of day)"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, postgame, morning, closing, validate]
+      date:
+        description: "Override today's date (ET), YYYY-MM-DD"
+        required: false
+        type: string
+      force:
+        description: "Retake snapshots already taken today (spends Odds API credits)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nba-collect
+  cancel-in-progress: false
+
+env:
+  ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+  TZ: America/New_York
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect NBA data
+        id: collect
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          DATE: ${{ github.event.inputs.date }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          ARGS=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ -n "$MODE" ] && ARGS+=(--mode "$MODE")
+            [ -n "$DATE" ] && ARGS+=(--date "$DATE")
+            [ "$FORCE" = "true" ] && ARGS+=(--force)
+          fi
+          python collect_nba.py "${ARGS[@]}"
+
+      # Runs even when a snapshot failed, so the stats that did update are kept.
+      - name: Commit updated data
+        if: always() && steps.collect.outputs.collected == 'true'
+        env:
+          BRANCH: ${{ github.ref_name }}
+          MODE: ${{ steps.collect.outputs.mode }}
+          DAY: ${{ steps.collect.outputs.date }}
+        run: |
+          git config user.name  "nba-bot"
+          git config user.email "nba-bot@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "data: ${MODE} — ${DAY}"
+          for i in 1 2 3; do
+            git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && break
+            echo "Push attempt $i failed, retrying..."
+            sleep 5
+          done
+
+      - name: Check email configured
+        id: email_check
+        if: always()
+        env:
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          if [ -n "$EMAIL_TO" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else echo "configured=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Send summary email
+        if: steps.collect.outputs.collected == 'true' && steps.collect.outputs.mode != 'postgame' && steps.email_check.outputs.configured == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_APP_PASSWORD }}
+          subject: NBA ${{ steps.collect.outputs.mode }} — ${{ steps.collect.outputs.date }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: NBA Collector <${{ secrets.EMAIL_USER }}>
+          body: |
+            NBA Betting Data — ${{ steps.collect.outputs.mode }} snapshot for ${{ steps.collect.outputs.date }}
+            Season ${{ steps.collect.outputs.season }}
+
+            ${{ steps.collect.outputs.stats }}
+
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
