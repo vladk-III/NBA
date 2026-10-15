@@ -192,11 +192,15 @@ def run_validate(sample: int) -> bool:
 
     counts = {stat: {name: 0 for name in cands} for stat, cands in VALIDATE_CANDIDATES.items()}
     parser_hits = {stat: 0 for stat in VALIDATE_CANDIDATES}
-    compared = 0
+    compared, misses = 0, 0
     for gid in picks:
         box = nba_cdn.fetch_boxscore(gid)
         if not box:
             LOG.warning("Validate: no box score for %s", gid)
+            misses += 1
+            if misses >= 3 and compared == 0:
+                LOG.error("Validate: first %d box scores all failed; stopping (run mode 'probe' to diagnose)", misses)
+                break
             continue
         parsed = {r["team"]: r for r in (nba_cdn.parse_boxscore(box, "validate") or [])}
         for side in ("homeTeam", "awayTeam"):
@@ -232,6 +236,53 @@ def run_validate(sample: int) -> bool:
     return ok
 
 
+# ─── Probe ────────────────────────────────────────────────────────────────
+PROBE_URLS = {
+    "NBA schedule": nba_cdn.SCHEDULE_URL,
+    "NBA today's scoreboard": "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json",
+    "NBA box score 2025-26": nba_cdn.BOXSCORE_URL.format(game_id="0022500001"),
+    "NBA box score 2022-23": nba_cdn.BOXSCORE_URL.format(game_id="0022200720"),
+    "NBA box score 2026-27 preseason": nba_cdn.BOXSCORE_URL.format(game_id="0012600001"),
+    "ESPN scoreboard": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20260211",
+    "Kalshi markets": f"{kalshi.API}/markets?series_ticker={kalshi.SERIES}&limit=1",
+}
+
+
+def run_probe() -> None:
+    """Report which data sources answer from this machine, and with which headers."""
+    import requests
+    from nba_pipeline.http import BROWSER_UA, DEFAULT_HEADERS, NBA_CDN_HEADERS
+
+    variants = {
+        "pipeline": None,
+        "nba_api": {**NBA_CDN_HEADERS, "Host": "cdn.nba.com"},
+        "minimal": {"User-Agent": BROWSER_UA, "Referer": "https://www.nba.com/"},
+        "bare": {},
+    }
+    lines = ["## Data source probe", "", "| Source | Headers | Result |", "|---|---|---|"]
+    for name, url in PROBE_URLS.items():
+        for label, headers in variants.items():
+            if label != "pipeline" and "nba.com" not in url:
+                continue
+            if label == "nba_api" and "cdn.nba.com" not in url:
+                continue
+            sent = headers if headers is not None else (
+                NBA_CDN_HEADERS if "nba.com" in url else DEFAULT_HEADERS)
+            try:
+                r = requests.get(url, headers=sent, timeout=20)
+                kind = r.headers.get("Content-Type", "?").split(";")[0]
+                ok = "OK" if r.status_code == 200 and "json" in kind else "FAIL"
+                result = f"{ok} {r.status_code} {kind}, {len(r.content)} bytes, server {r.headers.get('Server', '?')}"
+            except requests.RequestException as e:
+                result = f"FAIL {type(e).__name__}"
+            lines.append(f"| {name} | {label} | {result} |")
+    report = "\n".join(lines)
+    print(report)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(report + "\n")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 def resolve_mode(mode: str, now: datetime) -> str:
     if mode != "auto":
@@ -253,7 +304,7 @@ def set_output(**kwargs) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", default="auto", choices=["auto", "postgame", "morning", "closing", "validate"])
+    parser.add_argument("--mode", default="auto", choices=["auto", "postgame", "morning", "closing", "validate", "probe"])
     parser.add_argument("--date", help="Override today's date (ET), YYYY-MM-DD")
     parser.add_argument("--force", action="store_true", help="Take snapshots even if already taken today")
     parser.add_argument("--sample", type=int, default=40, help="Games to check in validate mode")
@@ -264,6 +315,11 @@ def main() -> int:
     today = args.date or now.astimezone(EASTERN).strftime("%Y-%m-%d")
     mode = resolve_mode(args.mode, now)
     LOG.info("Mode %s for %s", mode, today)
+
+    if mode == "probe":
+        run_probe()
+        set_output(collected="false", mode=mode, date=today)
+        return 0
 
     if mode == "validate":
         ok = run_validate(args.sample)
