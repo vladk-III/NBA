@@ -90,22 +90,23 @@ def parse_event(ev: dict) -> dict | None:
 
 
 def fetch_games(start: date, end: date) -> list[dict]:
-    """Counted games with an Eastern date between start and end, inclusive."""
+    """Counted games with an Eastern date between start and end, inclusive.
+
+    One request per day: the scoreboard's dates parameter is an Eastern-time date,
+    and ESPN answers 400 to date ranges.
+    """
     games, seen = [], set()
-    # Ask for one extra day each side: the API's date range is not in Eastern time.
-    cur, stop = start - timedelta(days=1), end + timedelta(days=1)
-    while cur <= stop:
-        chunk_end = min(cur + timedelta(days=30), stop)
-        params = {"dates": f"{cur:%Y%m%d}-{chunk_end:%Y%m%d}", "limit": 1000}
-        data, _ = get_json(SCOREBOARD_URL, params=params)
+    day = start
+    while day <= end:
+        data, _ = get_json(SCOREBOARD_URL, params={"dates": f"{day:%Y%m%d}", "limit": 1000})
         if data is None:
-            raise RuntimeError(f"Could not download the ESPN scoreboard for {params['dates']}")
+            raise RuntimeError(f"Could not download the ESPN scoreboard for {day}")
         for ev in data.get("events", []):
             row = parse_event(ev)
             if row and row["game_id"] not in seen and start.isoformat() <= row["game_date"] <= end.isoformat():
                 seen.add(row["game_id"])
                 games.append(row)
-        cur = chunk_end + timedelta(days=1)
+        day += timedelta(days=1)
     LOG.info("ESPN schedule %s to %s: %d counted games", start, end, len(games))
     return games
 
