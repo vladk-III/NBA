@@ -1,0 +1,13 @@
+{"meta": {"version": 1}, "game": {
+  "gameId": "0022600001", "gameEt": "2026-10-20T19:30:00-04:00", "gameCode": "20261020/NYKBOS", "gameStatus": 3, "period": 5,
+  "homeTeam": {"teamTricode": "BOS", "score": 120,
+    "periods": [{"period": 1, "periodType": "REGULAR"}, {"period": 2, "periodType": "REGULAR"}, {"period": 3, "periodType": "REGULAR"}, {"period": 4, "periodType": "REGULAR"}, {"period": 5, "periodType": "OVERTIME"}],
+    "statistics": {"fieldGoalsMade": 44, "fieldGoalsAttempted": 90, "threePointersMade": 15, "threePointersAttempted": 40,
+      "freeThrowsMade": 17, "freeThrowsAttempted": 20, "reboundsOffensive": 10, "reboundsDefensive": 35, "reboundsTotal": 45,
+      "reboundsPersonal": 41, "assists": 28, "steals": 8, "blocks": 5, "turnovers": 12, "turnoversTeam": 1, "turnoversTotal": 13, "foulsPersonal": 19}},
+  "awayTeam": {"teamTricode": "NYK", "score": 110,
+    "periods": [{"period": 1, "periodType": "REGULAR"}, {"period": 2, "periodType": "REGULAR"}, {"period": 3, "periodType": "REGULAR"}, {"period": 4, "periodType": "REGULAR"}, {"period": 5, "periodType": "OVERTIME"}],
+    "statistics": {"fieldGoalsMade": 40, "fieldGoalsAttempted": 88, "threePointersMade": 12, "threePointersAttempted": 35,
+      "freeThrowsMade": 18, "freeThrowsAttempted": 22, "reboundsOffensive": 8, "reboundsDefensive": 33, "reboundsTotal": 41,
+      "assists": 22, "steals": 6, "blocks": 3, "turnovers": 14, "turnoversTeam": 0, "foulsPersonal": 21}}
+}}

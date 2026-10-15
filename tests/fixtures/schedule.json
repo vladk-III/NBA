@@ -1,0 +1,17 @@
+{"meta": {"version": 1}, "leagueSchedule": {"seasonYear": "2026-27", "leagueId": "00", "gameDates": [
+  {"gameDate": "10/04/2026 00:00:00", "games": [
+    {"gameId": "0012600001", "gameStatus": 3, "gameDateEst": "2026-10-04T00:00:00Z", "gameDateTimeUTC": "2026-10-04T23:00:00Z",
+     "gameLabel": "Preseason", "gameSubLabel": "", "postponedStatus": "A",
+     "homeTeam": {"teamTricode": "BOS", "score": 110}, "awayTeam": {"teamTricode": "NYK", "score": 100}}]},
+  {"gameDate": "10/20/2026 00:00:00", "games": [
+    {"gameId": "0022600001", "gameStatus": 3, "gameDateEst": "2026-10-20T00:00:00Z", "gameDateTimeUTC": "2026-10-20T23:30:00Z",
+     "gameLabel": "", "gameSubLabel": "", "postponedStatus": "A",
+     "homeTeam": {"teamTricode": "BOS", "score": 120}, "awayTeam": {"teamTricode": "NYK", "score": 110}}]},
+  {"gameDate": "10/21/2026 00:00:00", "games": [
+    {"gameId": "0022600002", "gameStatus": 1, "gameDateEst": "2026-10-21T00:00:00Z", "gameDateTimeUTC": "2026-10-21T23:30:00Z",
+     "gameLabel": "", "gameSubLabel": "", "postponedStatus": "A",
+     "homeTeam": {"teamTricode": "NYK", "score": 0}, "awayTeam": {"teamTricode": "BOS", "score": 0}},
+    {"gameId": "0042600101", "gameStatus": 1, "gameDateEst": "2026-10-21T00:00:00Z", "gameDateTimeUTC": "2026-10-21T23:30:00Z",
+     "gameLabel": "", "gameSubLabel": "", "postponedStatus": "A",
+     "homeTeam": {"teamTricode": "", "score": 0}, "awayTeam": {"teamTricode": "", "score": 0}}]}
+]}}
