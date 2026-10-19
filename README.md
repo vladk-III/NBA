@@ -91,6 +91,7 @@ A draft of the NBA version of the NFL dashboard. Three models each forecast **bo
 - Money Ball has two bet rules, chosen on its tab:
   - **Expected value (default):** bet a side only when P(win) × payout − P(loss), at the best price across books, is at least the threshold you set (3% by default). Pushes return the stake. A quarter-Kelly stake (capped at 5% of bankroll) is shown as a sizing guide.
   - **Credible interval (the NFL rule):** bet when the line falls outside the BPS interval. NBA game-to-game noise makes this interval wide, so it bets rarely.
+- **Diagnostics tab:** sampler health for each model (max R̂, minimum bulk and tail ESS, divergences, E-BFMI), trace, density and rank plots for any parameter, a table of every parameter's posterior and convergence, and how the BPS weights on A, B and C moved game by game, with the particle filter's effective sample size.
 - Bets are graded at the best price across books, with ROI and closing line value (morning line vs. closing line). A sweep chart shows selectivity, win rate and ROI across thresholds or interval widths.
 - Files: `nba_model_core.py` (features, BPS, odds, grading; numpy/pandas only, unit-tested), `nba_models.py` (PyMC models), `nba_dashboard.py` (pipelines and Dash UI).
 - **Single code block, like the NFL dashboard:** `nba_dashboard_colab.py` holds the theme, dashboard, model training, predictions and historical charts in one file, and `NBA_Dashboard.ipynb` is the same code as one notebook cell.

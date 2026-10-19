@@ -89,6 +89,9 @@ def test_bps_learns_the_better_agent():
     fit = core.fit_bps(df, ["a", "b", "c"], ["sa", "sb", "sc"], "y", 300, 0.99, 0.99, seed=1)
     theta = fit["theta_mean"]
     assert theta[1] > theta[2] and theta[1] > theta[3]
+    h = fit["history"]
+    assert len(h["theta"]) == len(h["ess"]) == len(h["game_date"]) == 400
+    assert h["theta"][-1] == pytest.approx(fit["theta_mean"])
     flt = core.BPSFilter.from_state(fit["state"])
     pred = flt.predict([230, 225, 228], [3, 15, 12], 4000)
     assert abs(pred["mean"] - 230) < 4
