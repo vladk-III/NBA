@@ -3,7 +3,7 @@
 Automated pipeline that collects NBA box scores, pre-game cumulative team stats, multi-sportsbook odds and Kalshi game-total markets, committed as CSVs to this repo by GitHub Actions. It follows the same pattern as the NFL and CFB collectors: idempotent runs, season-aware, with optional email summaries.
 
 ```
-Postgame (5:17 AM ET)               Morning (11:23 AM ET)            Closing (6:37 PM ET)
+Postgame (3:17 AM ET)               Pregame (8:47 AM ET)             Closing (optional, manual)
 ┌───────────────────────────┐       ┌──────────────────────────┐     ┌──────────────────────────┐
 │ • NBA schedule (ESPN)     │       │ • Everything postgame does│     │ • Everything postgame does│
 │ • Box scores of finals    │  ──▶  │ • Odds API snapshot       │ ──▶ │ • Odds API snapshot       │
@@ -14,16 +14,16 @@ Postgame (5:17 AM ET)               Morning (11:23 AM ET)            Closing (6:
 
 ## Schedule
 
-GitHub delays or drops scheduled runs at the top of the hour, so every run is on an odd minute. Cron is in UTC, so Eastern times shift by an hour when daylight saving time ends.
+Two runs a day. GitHub delays scheduled runs (they have been starting 2.5 to 4 hours late) and drops some at the top of the hour, so both are on odd minutes with plenty of slack. Cron is in UTC, so Eastern times shift by an hour when daylight saving time ends.
 
-| Cron (UTC)    | EDT / EST          | Mode     | Purpose |
-|---------------|--------------------|----------|---------|
-| `17 9 * * *`  | 5:17 / 4:17 AM     | postgame | Box scores for last night's games, rebuild stats |
-| `23 15 * * *` | 11:23 / 10:23 AM   | morning  | Morning lines, before even noon ET holiday tips |
-| `47 16 * * *` | 12:47 / 11:47 AM   | morning  | Backup run; does nothing if the morning snapshot exists |
-| `37 22 * * *` | 6:37 / 5:37 PM     | closing  | Near-closing lines before the 7 PM ET tips |
+| Cron (UTC)    | EDT / EST      | Mode     | Purpose |
+|---------------|----------------|----------|---------|
+| `47 12 * * *` | 8:47 / 7:47 AM | morning  | Before the day's games: refresh schedule and stats (today's rows), then the odds and Kalshi snapshot |
+| `17 7 * * *`  | 3:17 / 2:17 AM | postgame | After the games: final scores and box scores, rebuild stats |
 
-Snapshots only cover games that have not tipped off yet. On days without games, every run is a no-op. A run fails (and GitHub emails you) if games remain today but the odds snapshot came back empty or errored; stats are still committed.
+Snapshots only cover games that have not tipped off yet. On days without games, every run is a no-op. A run fails (and GitHub emails you) if games remain today but the odds snapshot came back empty or errored; stats are still committed. The pregame run also collects any box scores the postgame run missed.
+
+One odds call a day is about 3 Odds API credits, roughly 90 a month. A near-tipoff `closing` snapshot is still available from Actions → Run workflow; without it, the closing line value columns stay blank.
 
 ## Setup
 
