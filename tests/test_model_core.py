@@ -166,3 +166,28 @@ def test_colab_files_are_in_sync_with_the_modules():
     assert build_colab.OUT_NB.read_text() == nb, "Stale: run python model/build_colab.py"
     cells = json.loads(nb)["cells"]
     assert [c["cell_type"] for c in cells].count("code") == 1   # one code block, like the NFL dashboard
+
+
+def _kalshi(gid, line, bid, ask, last, volume, label="morning", ts="2026-10-21T15:23:00Z"):
+    return {"snapshot_utc": ts, "snapshot_label": label, "game_id": gid, "line": line, "yes_bid": bid,
+            "yes_ask": ask, "last_price": last, "volume": volume}
+
+
+def test_kalshi_implied_total():
+    rows = [_kalshi("g1", 224.5, 49, 51, 50, 500),     # 50/50 at 224.5 -> implies exactly 224.5
+            _kalshi("g1", 220.5, 1, 99, 80, 0),        # spread too wide: priced from the last trade instead
+            _kalshi("g1", 240.5, 1, 2, 1, 900),        # priced at under 2 cents: dropped
+            _kalshi("g1", 230.5, 20, 22, 21, 10, ts="2026-10-21T10:00:00Z"),   # older snapshot: ignored
+            _kalshi("g2", 218.5, 59, 61, 60, 0),       # one line at 60% over -> median above the line
+            _kalshi("g3", 222.5, 49, 51, 50, 50, label="closing")]
+    k = core.kalshi_lines(pd.DataFrame(rows)).set_index("game_id")
+    assert set(k.index) == {"g1", "g2"} and k.loc["g1", "kalshi_n_lines"] == 2
+    from statistics import NormalDist
+    z80, z60 = NormalDist().inv_cdf(0.8), NormalDist().inv_cdf(0.6)
+    w_mid, w_last = 0.25 * 501, 0.8 * 0.2 * 1
+    expected = (w_mid * 224.5 + w_last * (220.5 + core.KALSHI_SIGMA * z80)) / (w_mid + w_last)
+    assert k.loc["g1", "kalshi_total"] == pytest.approx(expected)
+    assert 224.5 < k.loc["g1", "kalshi_total"] < 224.6      # the liquid 50/50 line dominates
+    assert k.loc["g2", "kalshi_total"] == pytest.approx(218.5 + core.KALSHI_SIGMA * z60)
+    assert core.kalshi_lines(pd.DataFrame(rows), "closing").set_index("game_id").loc["g3", "kalshi_total"] == 222.5
+    assert core.kalshi_lines(pd.DataFrame()).empty and core.kalshi_lines(None).empty

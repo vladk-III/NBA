@@ -182,17 +182,31 @@ def predict_b(idata, df, index, rng):
 # =============================================================================
 # MODEL C — market-anchored
 # =============================================================================
+KALSHI_GAP_CAP = 6.0   # points; a bigger gap is a thin or stale Kalshi market, not information
+
+
+def kalshi_gap(df: pd.DataFrame) -> np.ndarray:
+    """Kalshi's implied total minus the books' consensus line, capped; 0 where Kalshi has no market."""
+    if "kalshi_total" not in df:
+        return np.zeros(len(df))
+    gap = df["kalshi_total"].to_numpy(float) - df["line_total"].to_numpy(float)
+    return np.nan_to_num(np.clip(gap, -KALSHI_GAP_CAP, KALSHI_GAP_CAP), nan=0.0)
+
+
 def model_c(train: pd.DataFrame, tot_std: Standardizer, mar_std: Standardizer):
-    """train needs line_total and line_implied_home_margin. Works with zero rows (priors only)."""
+    """train needs line_total and line_implied_home_margin; kalshi_total is optional. Works with zero
+    rows (priors only). Kalshi only lists game totals, so it enters the total, not the margin."""
     Zt, Zm = tot_std.transform(train), mar_std.transform(train)
     line_t = train["line_total"].to_numpy(float)
     line_m = train["line_implied_home_margin"].to_numpy(float)
     gap_t = train["exp_total"].to_numpy(float) - line_t
     gap_m = train["exp_margin"].to_numpy(float) - line_m
+    gap_k = kalshi_gap(train)
     with pm.Model() as m:
         d0 = pm.Normal("d0", 0.0, 1.5)
         d1 = pm.Normal("d1", 0.0, 0.2)
         g_t = pm.Normal("g_t", 0.0, 0.75, shape=Zt.shape[1])
+        k1 = pm.Normal("k1", 0.0, 0.3)   # weight on where Kalshi's total sits relative to the books' line
         e0 = pm.Normal("e0", 0.0, 1.0)
         e1 = pm.Normal("e1", 0.0, 0.2)
         g_m = pm.Normal("g_m", 0.0, 0.75, shape=Zm.shape[1])
@@ -200,7 +214,7 @@ def model_c(train: pd.DataFrame, tot_std: Standardizer, mar_std: Standardizer):
         s_m = pm.Gamma("sigma_m", mu=12.5, sigma=2.5)
         nu = pm.Deterministic("nu", 2.0 + pm.Gamma("nu_raw", 4.0, 0.2))
         if len(train):
-            pm.StudentT("total", nu=nu, mu=line_t + d0 + d1 * gap_t + pt.dot(Zt, g_t), sigma=s_t,
+            pm.StudentT("total", nu=nu, mu=line_t + d0 + d1 * gap_t + k1 * gap_k + pt.dot(Zt, g_t), sigma=s_t,
                         observed=train["total_points"].to_numpy(float))
             pm.StudentT("margin", nu=nu, mu=line_m + e0 + e1 * gap_m + pt.dot(Zm, g_m), sigma=s_m,
                         observed=train["margin"].to_numpy(float))
@@ -214,7 +228,10 @@ def predict_c(idata, df, tot_std, mar_std, rng):
     line_m = df["line_implied_home_margin"].to_numpy(float)
     gap_t = df["exp_total"].to_numpy(float) - line_t
     gap_m = df["exp_margin"].to_numpy(float) - line_m
-    mu_t = line_t + _post(idata, "d0")[:, None] + _post(idata, "d1")[:, None] * gap_t + _post(idata, "g_t") @ Zt.T
+    # A state saved before Kalshi was added has no k1: treat it as zero weight.
+    k1 = _post(idata, "k1") if "k1" in idata.posterior else np.zeros_like(_post(idata, "d0"))
+    mu_t = (line_t + _post(idata, "d0")[:, None] + _post(idata, "d1")[:, None] * gap_t
+            + k1[:, None] * kalshi_gap(df) + _post(idata, "g_t") @ Zt.T)
     mu_m = line_m + _post(idata, "e0")[:, None] + _post(idata, "e1")[:, None] * gap_m + _post(idata, "g_m") @ Zm.T
     nu = _post(idata, "nu")
     tot = mu_t + _post(idata, "sigma_t")[:, None] * _student_t(rng, nu, mu_t.shape)

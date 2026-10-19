@@ -9,6 +9,8 @@ Everything here works on the files the data pipeline commits to data/:
 
 from __future__ import annotations
 
+from statistics import NormalDist
+
 import numpy as np
 import pandas as pd
 
@@ -154,6 +156,40 @@ def devig_pair(price_a, price_b):
     """Fair probability of side A from the two prices of one market (multiplicative de-vig)."""
     pa, pb = american_to_prob(price_a), american_to_prob(price_b)
     return pa / (pa + pb)
+
+
+KALSHI_SIGMA = 18.0      # spread of NBA totals around the line; turns P(over X) into an implied median
+KALSHI_MAX_SPREAD = 15   # cents; a wider bid/ask is too stale to price from, so fall back to the last trade
+
+
+def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
+    """One row per game_id: the game total Kalshi's KXNBATOTAL markets imply.
+
+    Each "over X points" line with price p (bid/ask mid, else last trade, in cents) implies a median
+    total of X + sigma * z(p). Lines are averaged with weights p(1 - p) * (volume + 1), so liquid
+    lines near 50/50 count most and lines priced at 2 or 98 cents barely count."""
+    cols = ["game_id", "kalshi_total", "kalshi_volume", "kalshi_n_lines"]
+    if kalshi is None or kalshi.empty:
+        return pd.DataFrame(columns=cols)
+    k = kalshi[(kalshi["snapshot_label"] == label) & kalshi["game_id"].notna()].copy()
+    if k.empty:
+        return pd.DataFrame(columns=cols)
+    k["game_id"] = k["game_id"].astype(str)
+    k = k[k["snapshot_utc"] == k.groupby("game_id")["snapshot_utc"].transform("max")]
+    for c in ["line", "yes_bid", "yes_ask", "last_price", "volume"]:
+        k[c] = pd.to_numeric(k[c], errors="coerce")
+    quoted = (k["yes_bid"] > 0) & (k["yes_ask"] < 100) & (k["yes_ask"] - k["yes_bid"]).between(0, KALSHI_MAX_SPREAD)
+    k["p"] = np.where(quoted, (k["yes_bid"] + k["yes_ask"]) / 2, k["last_price"]) / 100.0
+    k = k[k["line"].notna() & k["p"].between(0.02, 0.98)]
+    if k.empty:
+        return pd.DataFrame(columns=cols)
+    z = NormalDist().inv_cdf
+    k["implied"] = k["line"] + KALSHI_SIGMA * k["p"].map(z)
+    k["w"] = k["p"] * (1 - k["p"]) * (k["volume"].fillna(0).clip(lower=0) + 1)
+    rows = [{"game_id": gid, "kalshi_total": float(np.average(g["implied"], weights=g["w"])),
+             "kalshi_volume": float(g["volume"].fillna(0).sum()), "kalshi_n_lines": len(g)}
+            for gid, g in k.groupby("game_id")]
+    return pd.DataFrame(rows, columns=cols)
 
 
 def market_lines(odds: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
