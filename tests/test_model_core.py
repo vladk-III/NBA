@@ -191,3 +191,20 @@ def test_kalshi_implied_total():
     assert k.loc["g2", "kalshi_total"] == pytest.approx(218.5 + core.KALSHI_SIGMA * z60)
     assert core.kalshi_lines(pd.DataFrame(rows), "closing").set_index("game_id").loc["g3", "kalshi_total"] == 222.5
     assert core.kalshi_lines(pd.DataFrame()).empty and core.kalshi_lines(None).empty
+
+
+def test_kalshi_implied_home_margin():
+    base = {"snapshot_utc": "2026-10-21T19:20:00Z", "snapshot_label": "closing", "game_id": "g1",
+            "home_team_abbreviation": "NYK", "away_team_abbreviation": "BOS", "yes_bid": np.nan, "yes_ask": np.nan}
+    rows = [{**base, "team": "NYK", "line": 3.5, "last_price": 50, "volume": 0},    # NYK by 3.5 is a coin flip
+            {**base, "team": "BOS", "line": 1.5, "last_price": 50, "volume": 0},    # ...and so is BOS by 1.5
+            {**base, "team": "LAL", "line": 1.5, "last_price": 50, "volume": 999},  # not in the game: ignored
+            {**base, "game_id": "g2", "team": "BOS", "line": 6.5, "last_price": 40, "volume": 0}]
+    k = core.kalshi_lines(pd.DataFrame(rows), "closing", "spread").set_index("game_id")
+    assert list(k.columns) == ["kalshi_home_margin", "kalshi_spread_volume", "kalshi_spread_n_lines"]
+    assert k.loc["g1", "kalshi_home_margin"] == pytest.approx((3.5 - 1.5) / 2)   # equal weights: average of +3.5 and -1.5
+    assert k.loc["g1", "kalshi_spread_n_lines"] == 2
+    from statistics import NormalDist
+    # BOS by over 6.5 at 40% -> BOS median margin 6.5 + 12.5 z(0.4), so the home margin is its negative.
+    assert k.loc["g2", "kalshi_home_margin"] == pytest.approx(-(6.5 + core.KALSHI_SPREAD_SIGMA * NormalDist().inv_cdf(0.4)))
+    assert core.kalshi_lines(pd.DataFrame(rows), "morning", "spread").empty

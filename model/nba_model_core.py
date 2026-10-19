@@ -158,17 +158,24 @@ def devig_pair(price_a, price_b):
     return pa / (pa + pb)
 
 
-KALSHI_SIGMA = 18.0      # spread of NBA totals around the line; turns P(over X) into an implied median
-KALSHI_MAX_SPREAD = 15   # cents; a wider bid/ask is too stale to price from, so fall back to the last trade
+KALSHI_SIGMA = 18.0         # spread of NBA totals around the line; turns P(over X) into an implied median
+KALSHI_SPREAD_SIGMA = 12.5  # the same for the home margin around the spread
+KALSHI_MAX_SPREAD = 15      # cents; a wider bid/ask is too stale to price from, so fall back to the last trade
 
 
-def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
-    """One row per game_id: the game total Kalshi's KXNBATOTAL markets imply.
+def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning", market: str = "total") -> pd.DataFrame:
+    """One row per game_id: the number Kalshi's markets imply.
 
-    Each "over X points" line with price p (bid/ask mid, else last trade, in cents) implies a median
-    total of X + sigma * z(p). Lines are averaged with weights p(1 - p) * (volume + 1), so liquid
-    lines near 50/50 count most and lines priced at 2 or 98 cents barely count."""
-    cols = ["game_id", "kalshi_total", "kalshi_volume", "kalshi_n_lines"]
+    market="total" (KXNBATOTAL, "over X points") gives kalshi_total. market="spread" (KXNBASPREAD,
+    "TEAM wins by over X points", with a team column) gives kalshi_home_margin.
+
+    Each line X with price p (bid/ask mid, else last trade, in cents) implies a median of X + sigma * z(p),
+    for the total or for that team's margin (negated for the away team). Lines are averaged with weights
+    p(1 - p) * (volume + 1), so liquid lines near 50/50 count most and lines at 2 or 98 cents barely count."""
+    spread = market == "spread"
+    name, sigma = ("kalshi_home_margin", KALSHI_SPREAD_SIGMA) if spread else ("kalshi_total", KALSHI_SIGMA)
+    prefix = "kalshi_spread" if spread else "kalshi"
+    cols = ["game_id", name, f"{prefix}_volume", f"{prefix}_n_lines"]
     if kalshi is None or kalshi.empty:
         return pd.DataFrame(columns=cols)
     k = kalshi[(kalshi["snapshot_label"] == label) & kalshi["game_id"].notna()].copy()
@@ -181,13 +188,19 @@ def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
     quoted = (k["yes_bid"] > 0) & (k["yes_ask"] < 100) & (k["yes_ask"] - k["yes_bid"]).between(0, KALSHI_MAX_SPREAD)
     k["p"] = np.where(quoted, (k["yes_bid"] + k["yes_ask"]) / 2, k["last_price"]) / 100.0
     k = k[k["line"].notna() & k["p"].between(0.02, 0.98)]
+    if spread:
+        home = k["team"] == k["home_team_abbreviation"]
+        away = k["team"] == k["away_team_abbreviation"]
+        k = k[home | away].assign(side=np.where(home[home | away], 1.0, -1.0))
     if k.empty:
         return pd.DataFrame(columns=cols)
     z = NormalDist().inv_cdf
-    k["implied"] = k["line"] + KALSHI_SIGMA * k["p"].map(z)
+    k["implied"] = k["line"] + sigma * k["p"].map(z)
+    if spread:
+        k["implied"] *= k["side"]
     k["w"] = k["p"] * (1 - k["p"]) * (k["volume"].fillna(0).clip(lower=0) + 1)
-    rows = [{"game_id": gid, "kalshi_total": float(np.average(g["implied"], weights=g["w"])),
-             "kalshi_volume": float(g["volume"].fillna(0).sum()), "kalshi_n_lines": len(g)}
+    rows = [{"game_id": gid, name: float(np.average(g["implied"], weights=g["w"])),
+             f"{prefix}_volume": float(g["volume"].fillna(0).sum()), f"{prefix}_n_lines": len(g)}
             for gid, g in k.groupby("game_id")]
     return pd.DataFrame(rows, columns=cols)
 

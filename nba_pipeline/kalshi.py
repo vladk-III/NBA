@@ -1,5 +1,6 @@
-"""Kalshi NBA game-total markets (series KXNBATOTAL): every line's price and volume,
-plus open-vs-current movement for each game's highest-volume line. Public, no key."""
+"""Kalshi NBA game markets: totals (series KXNBATOTAL, "over X points") and spreads (KXNBASPREAD,
+"TEAM wins by over X points"). Every line's price and volume, plus open-vs-current movement for each
+game's highest-volume line. Public, no key."""
 
 import logging
 import re
@@ -14,6 +15,7 @@ LOG = logging.getLogger("nba_collector")
 
 API = "https://api.elections.kalshi.com/trade-api/v2"
 SERIES = "KXNBATOTAL"
+SPREAD_SERIES = "KXNBASPREAD"
 MAX_TRADE_PAGES = 30
 
 COLUMNS = [
@@ -22,6 +24,8 @@ COLUMNS = [
     "yes_bid", "yes_ask", "last_price", "previous_price", "volume", "volume_24h",
     "open_interest", "is_top_volume", "open_price", "price_change", "trade_count", "open_price_complete",
 ]
+# Spread lines also say whose margin the line is: "team" wins by more than "line" points.
+SPREAD_COLUMNS = COLUMNS[:8] + ["team"] + COLUMNS[8:]
 
 
 def date_code(game_date: str) -> str:
@@ -61,10 +65,16 @@ def _line(m: dict) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def open_markets() -> list[dict]:
+def _team(ticker: str) -> str | None:
+    """KXNBASPREAD-26OCT16PORGSW-GSW25 -> GSW."""
+    match = re.search(r"-([A-Z]+)\d*(?:\.\d+)?$", ticker or "")
+    return to_abbr(match.group(1)) if match else None
+
+
+def open_markets(series: str = SERIES) -> list[dict]:
     markets, cursor = [], None
     while True:
-        params = {"series_ticker": SERIES, "status": "open", "limit": 1000}
+        params = {"series_ticker": series, "status": "open", "limit": 1000}
         if cursor:
             params["cursor"] = cursor
         data, _ = get_json(f"{API}/markets", params=params, attempts=3)
@@ -101,14 +111,16 @@ def trade_history(ticker: str) -> tuple[float | None, int, bool]:
     return (oldest[1] if oldest else None), count, False
 
 
-def fetch_snapshot(label: str, game_date: str, games: pd.DataFrame, now: datetime) -> pd.DataFrame:
-    """All open total lines for game_date's games that have not tipped off."""
+def fetch_snapshot(label: str, game_date: str, games: pd.DataFrame, now: datetime,
+                   series: str = SERIES) -> pd.DataFrame:
+    """All open lines in a series (totals by default) for game_date's games that have not tipped off."""
+    spread = series == SPREAD_SERIES
     code = date_code(game_date)
     todays = games[games["game_date"] == game_date]
     by_teams = {(r.away_team_abbreviation, r.home_team_abbreviation): r for r in todays.itertuples(index=False)}
 
     rows = []
-    for m in open_markets():
+    for m in open_markets(series):
         event = m.get("event_ticker") or m.get("ticker", "").rsplit("-", 1)[0]
         seg = event.split("-", 1)[1] if "-" in event else ""
         if not seg.startswith(code):
@@ -124,7 +136,12 @@ def fetch_snapshot(label: str, game_date: str, games: pd.DataFrame, now: datetim
         tip = pd.Timestamp(game.tipoff_utc) if pd.notna(game.tipoff_utc) else None
         if tip is not None and tip <= pd.Timestamp(now):
             continue
+        team = _team(m.get("ticker")) if spread else None
+        if spread and team not in (game.home_team_abbreviation, game.away_team_abbreviation):
+            LOG.warning("Kalshi spread %s: team %s is not in the game", m.get("ticker"), team)
+            continue
         rows.append({
+            "team": team,
             "snapshot_utc": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "snapshot_label": label, "game_date": game_date, "game_id": game.game_id,
             "home_team_abbreviation": game.home_team_abbreviation,
@@ -136,9 +153,9 @@ def fetch_snapshot(label: str, game_date: str, games: pd.DataFrame, now: datetim
             "open_interest": _count(m, "open_interest"), "is_top_volume": False,
         })
 
-    df = pd.DataFrame(rows, columns=COLUMNS)
+    df = pd.DataFrame(rows, columns=SPREAD_COLUMNS if spread else COLUMNS)
     if df.empty:
-        LOG.info("Kalshi snapshot '%s': no open markets for %s", label, code)
+        LOG.info("Kalshi %s snapshot '%s': no open markets for %s", series, label, code)
         return df
     for col in ("open_price", "price_change", "trade_count", "open_price_complete", "is_top_volume"):
         df[col] = df[col].astype(object)
@@ -151,5 +168,5 @@ def fetch_snapshot(label: str, game_date: str, games: pd.DataFrame, now: datetim
         df.at[idx, "open_price_complete"] = complete
         if open_price is not None and pd.notna(df.at[idx, "last_price"]):
             df.at[idx, "price_change"] = df.at[idx, "last_price"] - open_price
-    LOG.info("Kalshi snapshot '%s': %d lines across %d games", label, len(df), df["game_id"].nunique())
+    LOG.info("Kalshi %s snapshot '%s': %d lines across %d games", series, label, len(df), df["game_id"].nunique())
     return df

@@ -1,34 +1,34 @@
 # NBA Betting Data Collector
 
-Automated pipeline that collects NBA box scores, pre-game cumulative team stats, multi-sportsbook odds and Kalshi game-total markets, committed as CSVs to this repo by GitHub Actions. It follows the same pattern as the NFL and CFB collectors: idempotent runs, season-aware, with optional email summaries.
+Automated pipeline that collects NBA box scores, pre-game cumulative team stats, multi-sportsbook odds and Kalshi game-total and spread markets, committed as CSVs to this repo by GitHub Actions. It follows the same pattern as the NFL and CFB collectors: idempotent runs, season-aware, with optional email summaries.
 
 ```
-Postgame (3:17 AM ET)               Pregame (8:47 AM ET)             Closing (optional, manual)
-┌───────────────────────────┐       ┌──────────────────────────┐     ┌──────────────────────────┐
-│ • NBA schedule (ESPN)     │       │ • Everything postgame does│     │ • Everything postgame does│
-│ • Box scores of finals    │  ──▶  │ • Odds API snapshot       │ ──▶ │ • Odds API snapshot       │
-│ • Rebuild pre-game stats  │       │ • Kalshi totals snapshot  │     │ • Kalshi totals snapshot  │
-│   (incl. today's games)   │       │ • Rebuild merged table    │     │ • Rebuild merged table    │
-└───────────────────────────┘       └──────────────────────────┘     └──────────────────────────┘
+Pregame (8:47 AM ET)              Closing (3:17 PM ET)              Postgame (3:17 AM ET)
+┌──────────────────────────┐      ┌──────────────────────────┐      ┌───────────────────────────┐
+│ • NBA schedule (ESPN)    │      │ • Same as pregame, with  │      │ • NBA schedule (ESPN)     │
+│ • Rebuild pre-game stats │ ──▶  │   the snapshot labeled   │ ──▶  │ • Box scores of finals    │
+│ • Odds API snapshot      │      │   "closing" (for CLV)    │      │ • Rebuild pre-game stats  │
+│ • Kalshi totals + spreads│      │                          │      │   (incl. today's games)   │
+│ • Rebuild merged table   │      │                          │      │ • Rebuild merged table    │
+└──────────────────────────┘      └──────────────────────────┘      └───────────────────────────┘
 ```
 
 ## Schedule
 
-Two runs a day. GitHub delays scheduled runs (they have been starting 2.5 to 4 hours late) and drops some at the top of the hour, so both are on odd minutes with plenty of slack. Cron is in UTC, so Eastern times shift by an hour when daylight saving time ends.
+GitHub delays or drops scheduled runs at the top of the hour, so every run is on an odd minute. Scheduled runs have been starting 2.5–4 hours late, so the times leave room for that. Cron is in UTC, so Eastern times shift by an hour when daylight saving time ends.
 
-| Cron (UTC)    | EDT / EST      | Mode     | Purpose |
-|---------------|----------------|----------|---------|
-| `47 12 * * *` | 8:47 / 7:47 AM | morning  | Before the day's games: refresh schedule and stats (today's rows), then the odds and Kalshi snapshot |
-| `17 7 * * *`  | 3:17 / 2:17 AM | postgame | After the games: final scores and box scores, rebuild stats |
+| Cron (UTC)    | EDT / EST          | Mode     | Purpose |
+|---------------|--------------------|----------|---------|
+| `47 12 * * *` | 8:47 / 7:47 AM     | morning  | Morning lines and Kalshi; lands before noon ET holiday tips even when late |
+| `17 19 * * *` | 3:17 / 2:17 PM     | closing  | Late lines and Kalshi for closing line value; lands before the 7 PM ET tips even 3.5 hours late |
+| `17 7 * * *`  | 3:17 / 2:17 AM     | postgame | Final scores and box scores for last night's games, rebuild stats |
 
-Snapshots only cover games that have not tipped off yet. On days without games, every run is a no-op. A run fails (and GitHub emails you) if games remain today but the odds snapshot came back empty or errored; stats are still committed. The pregame run also collects any box scores the postgame run missed.
-
-One odds call a day is about 3 Odds API credits, roughly 90 a month. A near-tipoff `closing` snapshot is still available from Actions → Run workflow; without it, the closing line value columns stay blank.
+Snapshots only cover games that have not tipped off yet. On days without games, every run is a no-op. A run fails (and GitHub emails you) if games remain today but the odds snapshot came back empty or errored; stats are still committed.
 
 ## Setup
 
 1. **Repository secrets** (Settings → Secrets and variables → Actions):
-   - `ODDS_API_KEY`: [The Odds API](https://the-odds-api.com) key. The free tier (500 credits/month) is enough: each snapshot is one call costing 3 credits, so about 6 credits per game day.
+   - `ODDS_API_KEY`: [The Odds API](https://the-odds-api.com) key. The free tier (500 credits/month) is enough on its own key: each snapshot is one call costing 3 credits, two snapshots a game day, so about 180 credits a month. If the key is shared with the NFL and CFB collectors, all three together use roughly 415 a month in October–November. Over the limit, odds requests fail until the monthly reset (nothing is charged).
    - Optional email: `EMAIL_USER`, `EMAIL_APP_PASSWORD`, `EMAIL_TO` (Gmail app password, same as the NFL repo).
 2. ESPN and Kalshi need no keys.
 3. Scheduled workflows only run from the default branch, so the workflow must be on `main`.
@@ -67,10 +67,13 @@ The season schedule with tip-off times, status and final scores.
 Append-only. One row per snapshot × game × sportsbook (every US book the Odds API returns), with moneyline, spread and total plus their prices. `snapshot_label` is `morning` or `closing`.
 
 ### `kalshi_snapshots.csv`
-Append-only. Every open line in Kalshi's NBA game-total markets per snapshot: bid/ask, last price, price 24h ago, volume, open interest. For each game's highest-volume line, `open_price` (first trade) and `price_change` (last − open) are added.
+Append-only. Every open line in Kalshi's NBA game-total markets (`KXNBATOTAL`, "over X points") per snapshot: bid/ask, last price, price 24h ago, volume, open interest. For each game's highest-volume line, `open_price` (first trade) and `price_change` (last − open) are added.
+
+### `kalshi_spread_snapshots.csv`
+The same for Kalshi's spread markets (`KXNBASPREAD`, "TEAM wins by over X points"), with a `team` column naming whose margin each line is.
 
 ### `nba_merged_data.csv`
-The model-ready table for the current season: the historical stats row, the morning lines with the original column names (`DraftKings - Over/Under Total`, …), the same for closing lines prefixed with `Close `, a `Consensus` median across all books, Kalshi's top-volume line, and the results `Total Score`, `Over Hit (...)` and `Home Covered (...)` (blank on a push or before the game is played).
+The model-ready table for the current season: the historical stats row, the morning lines with the original column names (`DraftKings - Over/Under Total`, …), the same for closing lines prefixed with `Close `, a `Consensus` median across all books, Kalshi's top-volume total line, and the results `Total Score`, `Over Hit (...)` and `Home Covered (...)` (blank on a push or before the game is played).
 
 ## Modeling dashboard (`model/`)
 
@@ -80,9 +83,9 @@ A draft of the NBA version of the NFL dashboard. Three models each forecast **bo
 |---|---|
 | A · Pace × efficiency | Expected possessions × points per possession from both teams' shrunk pace, offensive and defensive ratings, plus rest and back-to-backs |
 | B · Team strength | An offense and defense rating per team-season that carries over between seasons (AR(1) toward average), home court, and a shared game-level pace effect |
-| C · Market-anchored | The morning line plus small learned adjustments, including how far Kalshi's implied total sits from the books' line (totals only, since Kalshi lists no spreads); uses only its priors (the line itself) until games with lines are graded |
+| C · Market-anchored | The morning line plus small learned adjustments, including how far Kalshi's implied total and home margin sit from the books' lines; uses only its priors (the line itself) until games with lines are graded |
 
-- Kalshi's implied total: each "over X" line priced at p implies a median total of X + 18·z(p). Lines are averaged, weighted toward liquid lines near 50/50, and the gap to the books' line is capped at ±6 points. Games without a Kalshi market get a gap of 0, so the books' line alone anchors them. The learned weight starts at 0 (prior N(0, 0.3)), so Kalshi only moves the forecast once graded games show it adds something.
+- Kalshi's implied numbers: each "over X" line priced at p implies a median total of X + 18·z(p), and each "TEAM wins by over X" line a median margin for that team of X + 12.5·z(p). Lines are averaged, weighted toward liquid lines near 50/50, and the gap to the books' line is capped at ±6 points for totals and ±4 for the margin. Games without a Kalshi market get a gap of 0, so the books' line alone anchors them. The learned weight starts at 0 (prior N(0, 0.3), one weight per market), so Kalshi only moves the forecast once graded games show it adds something.
 - Early-season stats are shrunk toward league average: weight = games / (games + 10), so opening night uses league averages instead of the CSV's zeros.
 - Brier skill is measured against the market de-vigged from each game's own over/under (or spread) prices.
 - Money Ball has two bet rules, chosen on its tab:
@@ -101,6 +104,6 @@ Daily, after the overnight data run: **1 Train → 2 Optimize BPS → 3 Predict*
 ## Scope
 
 - Preseason, All-Star and the NBA Cup final are excluded. The Cup final doesn't count toward team records; the other Cup games are regular-season games and are included.
-- Data sources: [ESPN's public site API](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard) (schedule, box scores), [The Odds API](https://the-odds-api.com), [Kalshi](https://kalshi.com) series `KXNBATOTAL`.
+- Data sources: [ESPN's public site API](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard) (schedule, box scores), [The Odds API](https://the-odds-api.com), [Kalshi](https://kalshi.com) series `KXNBATOTAL` and `KXNBASPREAD`.
 - NBA.com's own feeds (stats.nba.com and cdn.nba.com) refuse requests from GitHub Actions servers with HTTP 403, so they are not used. ESPN's team box scores match the original CSV's source stat for stat (rebounds = `totalRebounds`, turnovers = `turnovers`, fouls = `fouls`).
 - `game_id` is ESPN's event id for games collected by this pipeline (e.g. `401809243`); the original 2025-26 rows keep their NBA.com ids (e.g. `0022500001`).

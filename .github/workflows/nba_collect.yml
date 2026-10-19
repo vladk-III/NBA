@@ -2,12 +2,16 @@ name: NBA Betting Data Collector
 
 on:
   schedule:
-    # Two runs a day. Odd minutes avoid GitHub's top-of-the-hour queue, and both times
+    # Three runs a day. Odd minutes avoid GitHub's top-of-the-hour queue, and both times
     # leave room for GitHub's delays (scheduled runs have been starting 2.5-4 hours late).
     # Cron is UTC; ET is 4h behind in EDT, 5h in EST.
     # ── Pregame: refresh schedule + stats, then odds + Kalshi snapshot ──
     # 12:47 UTC = 8:47 AM EDT / 7:47 AM EST; even 3.5h late it lands before noon ET tips
     - cron: "47 12 * * *"
+    # ── Closing: odds + Kalshi again, for closing line value ───────────
+    # 19:17 UTC = 3:17 PM EDT / 2:17 PM EST; even 3.5h late it lands before the 7 PM ET tips.
+    # Costs 3 more Odds API credits a game day (~90 a month).
+    - cron: "17 19 * * *"
     # ── Postgame: final scores + box scores, rebuild stats ─────────────
     # 07:17 UTC = 3:17 AM EDT / 2:17 AM EST, after every West Coast game is final
     - cron: "17 7 * * *"
@@ -15,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Mode (auto picks from the time of day; closing = optional extra odds snapshot)"
+        description: "Mode (auto picks from the time of day)"
         required: false
         default: "auto"
         type: choice
@@ -70,6 +74,7 @@ jobs:
           # Scheduled runs say which run they are, so a delayed start can't be mislabeled.
           case "${{ github.event.schedule }}" in
             "47 12 * * *") ARGS+=(--mode morning) ;;
+            "17 19 * * *") ARGS+=(--mode closing) ;;
             "17 7 * * *")  ARGS+=(--mode postgame) ;;
           esac
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
