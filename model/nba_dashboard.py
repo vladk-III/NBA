@@ -237,14 +237,22 @@ def load_data(fresh: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     return hist, _load_csv("odds_snapshots.csv", age)
 
 
-def attach_lines(feats: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame:
-    """Morning consensus lines and prices (closing snapshot as fallback for games with no morning one)."""
+def load_kalshi(fresh: bool = True) -> pd.DataFrame:
+    return _load_csv("kalshi_snapshots.csv", 0 if fresh else CSV_CACHE_TTL_SEC)
+
+
+def attach_lines(feats: pd.DataFrame, odds: pd.DataFrame, kalshi: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Morning consensus lines and prices (closing snapshot as fallback for games with no morning one),
+    plus the game total implied by Kalshi's morning markets (an input to Model C)."""
     morning = core.market_lines(odds, "morning")
     closing = core.market_lines(odds, "closing")
     lines = pd.concat([morning, closing[~closing["game_id"].isin(morning["game_id"])]], ignore_index=True)
     out = feats.merge(lines, on="game_id", how="left")
     out["line_implied_home_margin"] = -out["line_spread_home"]
-    return out
+    k_morning = core.kalshi_lines(kalshi, "morning")
+    k_closing = core.kalshi_lines(kalshi, "closing")
+    k = pd.concat([k_morning, k_closing[~k_closing["game_id"].isin(k_morning["game_id"])]], ignore_index=True)
+    return out.merge(k, on="game_id", how="left")
 
 
 def format_spread_val(val, home, away):
@@ -277,7 +285,7 @@ def run_training_pipeline(set_progress):
     hist, odds = load_data(fresh=True)
     final = hist["home_points"].notna()
     prior = core.league_prior(hist[final])
-    feats = attach_lines(core.build_features(hist, prior), odds)
+    feats = attach_lines(core.build_features(hist, prior), odds, load_kalshi())
     train = feats[feats["total_points"].notna()].reset_index(drop=True)
     upcoming = feats[feats["total_points"].isna()]
     if train.empty:
@@ -371,7 +379,7 @@ HISTORY_COLS = (["game_id", "game_date", "season", "home_team", "away_team"]
                    "combined_margin_mean", "combined_margin_median", "combined_margin_std",
                    "line_total", "line_spread_home", "line_implied_home_margin",
                    "over_price", "under_price", "best_over_price", "best_under_price",
-                   "home_price", "away_price", "best_home_price", "best_away_price",
+                   "home_price", "away_price", "best_home_price", "best_away_price", "kalshi_total",
                    "edge_total", "edge_margin", "edge_total_z", "edge_margin_z", "total_tier", "spread_tier",
                    "model_prob_over", "model_prob_home_cover", "total_draws_json", "margin_draws_json", "predicted_at"])
 
@@ -390,7 +398,7 @@ def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, de
 
     set_progress("Loading today's matchups and lines...")
     hist, odds = load_data(fresh=True)
-    feats = attach_lines(core.build_features(hist, bundle["prior"]), odds)
+    feats = attach_lines(core.build_features(hist, bundle["prior"]), odds, load_kalshi())
     open_games = feats[feats["total_points"].isna()]
     today = datetime.now(EASTERN).strftime("%Y-%m-%d")
     target = str(game_date)[:10] if game_date else today
@@ -417,7 +425,7 @@ def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, de
     }
     out = slate[["game_id", "game_date", "season", "home_team", "away_team", "line_total", "line_spread_home",
                  "line_implied_home_margin", "over_price", "under_price", "best_over_price", "best_under_price",
-                 "home_price", "away_price", "best_home_price", "best_away_price"]].copy()
+                 "home_price", "away_price", "best_home_price", "best_away_price", "kalshi_total"]].copy()
     for a, (tot, mar) in draws.items():
         out[f"{a}_total_mean"], out[f"{a}_total_std"] = tot.mean(0), tot.std(0)
         out[f"{a}_margin_mean"], out[f"{a}_margin_std"] = mar.mean(0), mar.std(0)

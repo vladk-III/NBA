@@ -80,8 +80,9 @@ A draft of the NBA version of the NFL dashboard. Three models each forecast **bo
 |---|---|
 | A · Pace × efficiency | Expected possessions × points per possession from both teams' shrunk pace, offensive and defensive ratings, plus rest and back-to-backs |
 | B · Team strength | An offense and defense rating per team-season that carries over between seasons (AR(1) toward average), home court, and a shared game-level pace effect |
-| C · Market-anchored | The morning line plus small learned adjustments; uses only its priors (the line itself) until games with lines are graded |
+| C · Market-anchored | The morning line plus small learned adjustments, including how far Kalshi's implied total sits from the books' line (totals only, since Kalshi lists no spreads); uses only its priors (the line itself) until games with lines are graded |
 
+- Kalshi's implied total: each "over X" line priced at p implies a median total of X + 18·z(p). Lines are averaged, weighted toward liquid lines near 50/50, and the gap to the books' line is capped at ±6 points. Games without a Kalshi market get a gap of 0, so the books' line alone anchors them. The learned weight starts at 0 (prior N(0, 0.3)), so Kalshi only moves the forecast once graded games show it adds something.
 - Early-season stats are shrunk toward league average: weight = games / (games + 10), so opening night uses league averages instead of the CSV's zeros.
 - Brier skill is measured against the market de-vigged from each game's own over/under (or spread) prices.
 - Money Ball has two bet rules, chosen on its tab:
