@@ -185,7 +185,8 @@ def take_snapshots(label: str, games: pd.DataFrame, today: str, now: datetime, f
 def rebuild_merged(history: pd.DataFrame, games: pd.DataFrame) -> int:
     seasons = set(games["season"].dropna())
     merged = merge.build_merged(history, read_csv(ODDS_FILE, odds.COLUMNS),
-                                read_csv(KALSHI_FILE, kalshi.COLUMNS), seasons)
+                                read_csv(KALSHI_FILE, kalshi.COLUMNS), seasons,
+                                read_csv(KALSHI_SPREAD_FILE, kalshi.SPREAD_COLUMNS))
     write_csv(merged, MERGED_FILE)
     return len(merged)
 

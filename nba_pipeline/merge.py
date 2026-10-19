@@ -15,6 +15,10 @@ MARKETS = {
 
 KALSHI = {"Kalshi Line": "line", "Kalshi Open Price": "open_price", "Kalshi Current Price": "last_price",
           "Kalshi Price Change": "price_change", "Kalshi Volume": "volume"}
+# Top-volume spread line: "Kalshi Spread Team" wins by more than "Kalshi Spread Line" points.
+KALSHI_SPREAD = {"Kalshi Spread Line": "line", "Kalshi Spread Open Price": "open_price",
+                 "Kalshi Spread Current Price": "last_price", "Kalshi Spread Price Change": "price_change",
+                 "Kalshi Spread Volume": "volume"}
 
 # snapshot label -> column prefix. Morning columns keep the original names.
 LABELS = {"morning": "", "closing": "Close "}
@@ -46,7 +50,8 @@ def odds_wide(odds: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(frames, axis=1) if frames else pd.DataFrame()
 
 
-def kalshi_wide(kalshi: pd.DataFrame) -> pd.DataFrame:
+def kalshi_wide(kalshi: pd.DataFrame, columns: dict = KALSHI, team_col: str | None = None) -> pd.DataFrame:
+    """Each game's highest-volume Kalshi line per snapshot label; team_col names the spread's team."""
     frames = []
     for label, prefix in LABELS.items():
         snap = _latest(kalshi, label)
@@ -54,8 +59,9 @@ def kalshi_wide(kalshi: pd.DataFrame) -> pd.DataFrame:
         if snap.empty:
             continue
         snap = snap.drop_duplicates("game_id").set_index("game_id")
-        frames.append(pd.DataFrame({f"{prefix}{name}": pd.to_numeric(snap[src], errors="coerce")
-                                    for name, src in KALSHI.items()}))
+        cols = {f"{prefix}{team_col}": snap["team"]} if team_col else {}
+        cols.update({f"{prefix}{name}": pd.to_numeric(snap[src], errors="coerce") for name, src in columns.items()})
+        frames.append(pd.DataFrame(cols))
     return pd.concat(frames, axis=1) if frames else pd.DataFrame()
 
 
@@ -66,10 +72,12 @@ def _hit(actual: pd.Series, line: pd.Series) -> pd.Series:
 
 
 def build_merged(history: pd.DataFrame, odds: pd.DataFrame, kalshi: pd.DataFrame,
-                 seasons: set[str]) -> pd.DataFrame:
+                 seasons: set[str], kalshi_spreads: pd.DataFrame | None = None) -> pd.DataFrame:
     df = history[history["season"].isin(seasons)].copy()
     df["game_id"] = df["game_id"].astype(str)
-    for wide in (odds_wide(odds), kalshi_wide(kalshi)):
+    spreads = (kalshi_wide(kalshi_spreads, KALSHI_SPREAD, "Kalshi Spread Team")
+               if kalshi_spreads is not None and not kalshi_spreads.empty else pd.DataFrame())
+    for wide in (odds_wide(odds), kalshi_wide(kalshi), spreads):
         if not wide.empty:
             wide.index = wide.index.astype(str)
             df = df.join(wide, on="game_id")
@@ -87,4 +95,9 @@ def build_merged(history: pd.DataFrame, odds: pd.DataFrame, kalshi: pd.DataFrame
             spread_col = f"{prefix}{book} - Point Spread Home"
             if spread_col in df:
                 df[f"{prefix}Home Covered ({book})"] = _hit(margin + df[spread_col], pd.Series(0.0, index=df.index))
+        team_col, line_col = f"{prefix}Kalshi Spread Team", f"{prefix}Kalshi Spread Line"
+        if team_col in df:
+            # Margin of the team the Kalshi line names; blank where there was no Kalshi spread.
+            team_margin = margin.where(df[team_col] == df["home_team_abbreviation"], -margin).where(df[team_col].notna())
+            df[f"{prefix}Kalshi Spread Covered"] = _hit(team_margin, df[line_col])
     return df.reset_index(drop=True)
