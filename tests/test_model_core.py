@@ -156,9 +156,13 @@ def test_backtest_ev_rule():
     assert core.backtest(prep, 0.5, rule="interval")["total"]["n_games"] == 3
 
 
-def test_colab_notebook_is_in_sync_with_the_modules():
-    """model/NBA_Dashboard.ipynb is generated from the .py files; rebuild it after editing them:
-    python model/build_colab.py"""
+def test_colab_files_are_in_sync_with_the_modules():
+    """nba_dashboard_colab.py and NBA_Dashboard.ipynb are generated from the module files; rebuild
+    them after editing: python model/build_colab.py"""
+    import json
     import build_colab
-    expected, _ = build_colab.build(write=False)
-    assert build_colab.OUT.read_text() == expected, "Notebook is stale: run python model/build_colab.py"
+    code, nb = build_colab.build(write=False)
+    assert build_colab.OUT_PY.read_text() == code, "Stale: run python model/build_colab.py"
+    assert build_colab.OUT_NB.read_text() == nb, "Stale: run python model/build_colab.py"
+    cells = json.loads(nb)["cells"]
+    assert [c["cell_type"] for c in cells].count("code") == 1   # one code block, like the NFL dashboard

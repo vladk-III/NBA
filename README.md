@@ -88,11 +88,12 @@ A draft of the NBA version of the NFL dashboard. Three models each forecast **bo
   - **Expected value (default):** bet a side only when P(win) × payout − P(loss), at the best price across books, is at least the threshold you set (3% by default). Pushes return the stake. A quarter-Kelly stake (capped at 5% of bankroll) is shown as a sizing guide.
   - **Credible interval (the NFL rule):** bet when the line falls outside the BPS interval. NBA game-to-game noise makes this interval wide, so it bets rarely.
 - Bets are graded at the best price across books, with ROI and closing line value (morning line vs. closing line). A sweep chart shows selectivity, win rate and ROI across thresholds or interval widths.
-- Files: `nba_model_core.py` (features, BPS, odds, grading; numpy/pandas only, unit-tested), `nba_models.py` (PyMC models), `nba_dashboard.py` (pipelines and Dash UI), and **`NBA_Dashboard.ipynb`, all three in one Colab notebook**.
+- Files: `nba_model_core.py` (features, BPS, odds, grading; numpy/pandas only, unit-tested), `nba_models.py` (PyMC models), `nba_dashboard.py` (pipelines and Dash UI).
+- **Single code block, like the NFL dashboard:** `nba_dashboard_colab.py` holds the theme, dashboard, model training, predictions and historical charts in one file, and `NBA_Dashboard.ipynb` is the same code as one notebook cell.
 
-Run in Colab: open `model/NBA_Dashboard.ipynb` (File → Upload notebook, or File → Open notebook → GitHub tab) and choose Runtime → Run all.
+Run in Colab: open `model/NBA_Dashboard.ipynb` (File → Upload notebook, or File → Open notebook → GitHub tab) and run its one cell, or paste `model/nba_dashboard_colab.py` into a cell.
 
-The notebook is generated from the `.py` files. After editing them, rebuild it with `python model/build_colab.py`; a test fails if it falls out of sync.
+Both are generated from the module files. After editing those, rebuild with `python model/build_colab.py`; a test fails if either falls out of sync.
 
 Daily, after the overnight data run: **1 Train → 2 Optimize BPS → 3 Predict**. Model state and `predictions_history.csv` are saved to Google Drive under `Stonks/Basketball/NBA/2026-27`.
 
