@@ -7,6 +7,8 @@ venv/
 
 # Notebooks stay local: they have contained API keys
 *.ipynb
+# ...except the generated dashboard notebook, which holds no keys
+!model/NBA_Dashboard.ipynb
 .ipynb_checkpoints/
 
 # IDE

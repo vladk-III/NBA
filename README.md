@@ -72,6 +72,31 @@ Append-only. Every open line in Kalshi's NBA game-total markets per snapshot: bi
 ### `nba_merged_data.csv`
 The model-ready table for the current season: the historical stats row, the morning lines with the original column names (`DraftKings - Over/Under Total`, …), the same for closing lines prefixed with `Close `, a `Consensus` median across all books, Kalshi's top-volume line, and the results `Total Score`, `Over Hit (...)` and `Home Covered (...)` (blank on a push or before the game is played).
 
+## Modeling dashboard (`model/`)
+
+A draft of the NBA version of the NFL dashboard. Three models each forecast **both** the total and the home margin, and Bayesian Predictive Synthesis (the same Rao-Blackwellized particle filter as the NFL dashboard, generalized from 2 to 3 inputs) blends them in each market.
+
+| Model | What it uses |
+|---|---|
+| A · Pace × efficiency | Expected possessions × points per possession from both teams' shrunk pace, offensive and defensive ratings, plus rest and back-to-backs |
+| B · Team strength | An offense and defense rating per team-season that carries over between seasons (AR(1) toward average), home court, and a shared game-level pace effect |
+| C · Market-anchored | The morning line plus small learned adjustments; uses only its priors (the line itself) until games with lines are graded |
+
+- Early-season stats are shrunk toward league average: weight = games / (games + 10), so opening night uses league averages instead of the CSV's zeros.
+- Brier skill is measured against the market de-vigged from each game's own over/under (or spread) prices.
+- Money Ball has two bet rules, chosen on its tab:
+  - **Expected value (default):** bet a side only when P(win) × payout − P(loss), at the best price across books, is at least the threshold you set (3% by default). Pushes return the stake. A quarter-Kelly stake (capped at 5% of bankroll) is shown as a sizing guide.
+  - **Credible interval (the NFL rule):** bet when the line falls outside the BPS interval. NBA game-to-game noise makes this interval wide, so it bets rarely.
+- Bets are graded at the best price across books, with ROI and closing line value (morning line vs. closing line). A sweep chart shows selectivity, win rate and ROI across thresholds or interval widths.
+- Files: `nba_model_core.py` (features, BPS, odds, grading; numpy/pandas only, unit-tested), `nba_models.py` (PyMC models), `nba_dashboard.py` (pipelines and Dash UI).
+- **Single code block, like the NFL dashboard:** `nba_dashboard_colab.py` holds the theme, dashboard, model training, predictions and historical charts in one file, and `NBA_Dashboard.ipynb` is the same code as one notebook cell.
+
+Run in Colab: open `model/NBA_Dashboard.ipynb` (File → Upload notebook, or File → Open notebook → GitHub tab) and run its one cell, or paste `model/nba_dashboard_colab.py` into a cell.
+
+Both are generated from the module files. After editing those, rebuild with `python model/build_colab.py`; a test fails if either falls out of sync.
+
+Daily, after the overnight data run: **1 Train → 2 Optimize BPS → 3 Predict**. Model state and `predictions_history.csv` are saved to Google Drive under `Stonks/Basketball/NBA/2026-27`.
+
 ## Scope
 
 - Preseason, All-Star and the NBA Cup final are excluded. The Cup final doesn't count toward team records; the other Cup games are regular-season games and are included.

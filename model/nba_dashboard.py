@@ -1,0 +1,971 @@
+#!/usr/bin/env python3
+"""
+NBA Bayesian Betting Dashboard
+==============================
+The NBA version of the NFL dashboard: three forecasting models, Bayesian Predictive Synthesis
+(McAlinn, Aastveit, Nakajima & West 2018) through a Rao-Blackwellized particle filter, Brier
+skill against the de-vigged market, confusion matrices, and the Money Ball credible-interval
+rule.
+
+Difference from the NFL setup: every model (A pace x efficiency, B team strength, C market-
+anchored) forecasts BOTH the total and the home margin, and BPS blends all three in each market.
+
+Data comes from this repo's data/ folder (local clone) or GitHub raw:
+  historical_nba_cumulative_stats.csv  pre-game team stats + final scores
+  odds_snapshots.csv                   morning and closing lines from every US book
+
+Run in Colab:
+  !git clone https://github.com/vladk-III/NBA.git
+  %cd NBA
+  %run model/nba_dashboard.py
+Daily: 1 Train (after the overnight data run) -> 2 Optimize BPS -> 3 Predict.
+"""
+
+GITHUB_OWNER = "vladk-III"
+GITHUB_REPO = "NBA"
+GITHUB_BRANCH = "main"
+DATA_SUBDIR = "data"
+
+DRAWS, TUNE, CHAINS = 1000, 1000, 4
+NUTS_SAMPLER = "auto"            # "auto" uses nutpie when installed, else PyMC's sampler
+TRAIN_SEED = 20261021
+BPS_SEED = 20261022
+JUPYTER_MODE = "external"
+CSV_CACHE_TTL_SEC = 300
+MAX_STORED_DRAWS = 1000          # per game per market in predictions_history.csv (file-size guard)
+AGENTS = ["A", "B", "C"]
+AGENT_NAMES = {"A": "Mod A (Pace×Eff)", "B": "Mod B (Team)", "C": "Mod C (Market)"}
+
+import io
+import json
+import logging
+import os
+import pickle
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+def _ensure(pkg: str, import_name: str | None = None):
+    try:
+        __import__(import_name or pkg)
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], check=True)
+
+
+for _pkg, _imp in [("pymc", "pymc"), ("arviz", "arviz"), ("netCDF4", "netCDF4"), ("requests", "requests"),
+                   ("dash", "dash"), ("plotly", "plotly"), ("dash[diskcache]", "diskcache"),
+                   ("multiprocess", "multiprocess"), ("nutpie", "nutpie")]:
+    try:
+        _ensure(_pkg, _imp)
+    except subprocess.CalledProcessError:
+        pass  # nutpie is optional; the rest will fail loudly on import below
+
+import numpy as np
+import pandas as pd
+import requests
+import arviz as az
+import diskcache
+import plotly.graph_objects as go
+from dash import Dash, html, dcc, Input, Output, State, dash_table, DiskcacheManager
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+LOG = logging.getLogger("nba_dashboard")
+EASTERN = ZoneInfo("America/New_York")
+
+
+def _load_model_modules():
+    """Import nba_model_core / nba_models from next to this file, the repo's model/ folder,
+    or (when this file was pasted into a notebook) download them from GitHub."""
+    here = Path(globals().get("__file__", Path.cwd() / "model" / "x.py")).resolve().parent
+    for d in (here, Path.cwd() / "model", Path.cwd()):
+        if (d / "nba_model_core.py").exists():
+            sys.path.insert(0, str(d))
+            break
+    else:
+        d = Path.cwd() / "_nba_model_src"
+        d.mkdir(exist_ok=True)
+        for name in ("nba_model_core.py", "nba_models.py"):
+            url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/model/{name}"
+            (d / name).write_text(requests.get(url, timeout=30).text)
+        sys.path.insert(0, str(d))
+    import nba_model_core as core
+    import nba_models as models
+    return core, models
+
+
+if "BPSFilter" in globals() and "model_a" in globals():
+    # Single-notebook build (NBA_Dashboard.ipynb): core and model code already live in this namespace.
+    core = models = sys.modules[__name__]
+else:
+    core, models = _load_model_modules()
+
+try:
+    from google.colab import drive
+    drive.mount("/content/drive", force_remount=False)
+    DRIVE_BASE = Path("/content/drive/MyDrive/Stonks") / "Basketball/NBA/2026-27"
+except Exception:
+    DRIVE_BASE = Path("./NBA_Betting_Engine")
+STATE_DIR = DRIVE_BASE / "nba_model_state"
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+PREDICTIONS_HISTORY_PATH = DRIVE_BASE / "predictions_history.csv"
+BUNDLE_PATH = STATE_DIR / "model_bundle.pkl"
+BPS_BUNDLE_PATH = STATE_DIR / "bps_bundle.pkl"
+
+# =============================================================================
+# THEME & UI STYLES (same autumn palette as the NFL dashboard)
+# =============================================================================
+theme = {
+    "page_bg": "#482E2D", "card_bg": "#FFFDF8", "border": "#E5D9C5", "text_main": "#3F0E00",
+    "text_axis": "#8C1C04", "text_muted": "#BF7F04", "grid": "#F4EBE1",
+    "colors": ["#8C1C04", "#BF5B05", "#BF7F04", "#92780A", "#3F0E00"],
+    "positive": "#92780A", "negative": "#8C1C04",
+    "font": "'Segoe UI', 'Trebuchet MS', 'Helvetica Neue', sans-serif",
+}
+HEATMAP_SCALE = [[0.0, "#FBF1E4"], [0.35, "#EBB98A"], [0.7, "#BF5B05"], [1.0, "#8C1C04"]]
+CARD_STYLE = {"backgroundColor": theme["card_bg"], "border": f"2px solid {theme['border']}",
+              "borderRadius": "24px", "padding": "24px 28px", "marginBottom": "24px",
+              "boxShadow": "0 6px 16px rgba(0, 0, 0, 0.3)"}
+BTN_STYLE = {"fontSize": "15px", "padding": "12px 24px", "cursor": "pointer",
+             "backgroundColor": theme["colors"][1], "color": "white", "border": "none",
+             "borderRadius": "30px", "fontWeight": "700", "marginRight": "14px",
+             "boxShadow": "0 2px 8px rgba(191, 91, 5, 0.4)"}
+BTN_STYLE_SECONDARY = {**BTN_STYLE, "backgroundColor": "transparent", "color": theme["card_bg"],
+                       "border": f"2px solid {theme['card_bg']}", "boxShadow": "none"}
+INPUT_STYLE = {"width": "110px", "padding": "8px 12px", "borderRadius": "12px",
+               "border": f"2px solid {theme['border']}", "backgroundColor": theme["card_bg"],
+               "color": theme["text_main"], "fontWeight": "700", "fontSize": "14px",
+               "marginRight": "28px", "fontFamily": theme["font"]}
+CONTROL_LABEL_STYLE = {"color": theme["card_bg"], "fontWeight": "700", "marginRight": "10px", "fontSize": "14px"}
+TAB_STYLE = {"borderBottom": f"2px solid {theme['colors'][2]}", "padding": "16px 24px", "fontWeight": "700",
+             "color": theme["card_bg"], "backgroundColor": "transparent", "borderTop": "none",
+             "borderLeft": "none", "borderRight": "none", "fontSize": "16px",
+             "borderRadius": "12px 12px 0 0", "opacity": "0.7"}
+TAB_SELECTED_STYLE = {**TAB_STYLE, "borderBottom": f"4px solid {theme['colors'][1]}",
+                      "color": theme["colors"][1], "opacity": "1.0"}
+TABLE_STYLE_CELL = {"fontFamily": theme["font"], "fontSize": "13.5px", "padding": "12px 14px",
+                    "backgroundColor": theme["card_bg"], "color": theme["text_main"],
+                    "borderBottom": f"1px dashed {theme['grid']}", "textAlign": "left"}
+TABLE_STYLE_HEADER = {"fontWeight": "800", "backgroundColor": theme["grid"], "color": theme["colors"][4],
+                      "border": "none", "padding": "14px 14px", "textAlign": "left", "fontSize": "12px",
+                      "textTransform": "uppercase"}
+STATUS_STYLE = {"color": "#E5D9C5", "fontSize": "14px", "fontWeight": "600", "marginBottom": "6px"}
+
+
+def kpi_card(label, value, sub=None):
+    children = [html.Div(label, style={"fontSize": "12.5px", "fontWeight": "700", "color": theme["text_axis"],
+                                       "marginBottom": "6px", "textTransform": "uppercase"}),
+                html.Div(value, style={"fontSize": "26px", "fontWeight": "800", "color": theme["colors"][0]})]
+    if sub:
+        children.append(html.Div(sub, style={"fontSize": "12px", "color": theme["text_muted"], "marginTop": "6px"}))
+    return html.Div(children, style={**CARD_STYLE, "flex": "1", "minWidth": "190px", "marginBottom": "0px"})
+
+
+def section_header(title, subtext=None):
+    children = [html.H3(title, style={"color": theme["card_bg"], "fontSize": "18px", "fontWeight": "800",
+                                      "marginBottom": "2px", "marginTop": "0px"})]
+    if subtext:
+        children.append(html.P(subtext, style={"fontSize": "13px", "color": theme["border"],
+                                               "marginTop": "0px", "marginBottom": "14px"}))
+    return html.Div(children)
+
+
+def empty_state(message, sub=None):
+    children = [html.P(message, style={"color": theme["text_main"], "fontSize": "15px", "fontWeight": "700", "margin": "0 0 4px 0"})]
+    if sub:
+        children.append(html.P(sub, style={"color": theme["text_muted"], "fontSize": "13px", "margin": "0"}))
+    return html.Div(children, style={**CARD_STYLE, "textAlign": "center", "padding": "36px 24px"})
+
+
+def error_state(title, detail):
+    return html.Div([html.Div(f"⚠ {title}", style={"color": theme["negative"], "fontWeight": "700", "fontSize": "15px", "marginBottom": "8px"}),
+                     html.Pre(detail, style={"fontSize": "12px", "color": theme["text_muted"], "whiteSpace": "pre-wrap", "margin": "0"})],
+                    style={**CARD_STYLE, "borderLeft": f"4px solid {theme['negative']}"})
+
+
+def apply_plotly_theme(fig, title):
+    fig.update_layout(title=dict(text=title, font=dict(color=theme["text_main"], family=theme["font"], size=15)),
+                      plot_bgcolor=theme["card_bg"], paper_bgcolor=theme["card_bg"],
+                      font=dict(color=theme["text_axis"], family=theme["font"], size=12),
+                      xaxis=dict(gridcolor=theme["grid"], zerolinecolor=theme["grid"]),
+                      yaxis=dict(gridcolor=theme["grid"], zerolinecolor=theme["grid"]),
+                      margin=dict(t=50, b=50, l=50, r=24),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    return fig
+
+
+def table(df, page_size=15, cond=None):
+    return dash_table.DataTable(data=df.to_dict("records"), columns=[{"name": c, "id": c} for c in df.columns],
+                                style_cell=TABLE_STYLE_CELL, style_header=TABLE_STYLE_HEADER, sort_action="native",
+                                page_size=page_size, style_data_conditional=cond or [])
+
+
+# =============================================================================
+# DATA
+# =============================================================================
+_CSV_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+
+
+def _load_csv(filename: str, max_age: float = CSV_CACHE_TTL_SEC) -> pd.DataFrame:
+    """data/<file> from a local clone, else GitHub raw (cached for max_age seconds)."""
+    for local in (Path(DATA_SUBDIR) / filename, Path("..") / DATA_SUBDIR / filename):
+        if local.exists():
+            return pd.read_csv(local, dtype={"game_id": str})
+    url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{DATA_SUBDIR}/{filename}"
+    hit = _CSV_CACHE.get(url)
+    if hit is not None and max_age > 0 and time.time() - hit[0] < max_age:
+        return hit[1].copy()
+    try:
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200:
+            df = pd.read_csv(io.StringIO(r.text), dtype={"game_id": str})
+            _CSV_CACHE[url] = (time.time(), df)
+            return df.copy()
+    except requests.RequestException:
+        pass
+    return hit[1].copy() if hit is not None else pd.DataFrame()
+
+
+def load_data(fresh: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    age = 0 if fresh else CSV_CACHE_TTL_SEC
+    hist = _load_csv("historical_nba_cumulative_stats.csv", age)
+    if hist.empty:
+        raise RuntimeError("historical_nba_cumulative_stats.csv is empty or unreachable.")
+    return hist, _load_csv("odds_snapshots.csv", age)
+
+
+def attach_lines(feats: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame:
+    """Morning consensus lines and prices (closing snapshot as fallback for games with no morning one)."""
+    morning = core.market_lines(odds, "morning")
+    closing = core.market_lines(odds, "closing")
+    lines = pd.concat([morning, closing[~closing["game_id"].isin(morning["game_id"])]], ignore_index=True)
+    out = feats.merge(lines, on="game_id", how="left")
+    out["line_implied_home_margin"] = -out["line_spread_home"]
+    return out
+
+
+def format_spread_val(val, home, away):
+    """Home-margin number -> book notation naming the favorite (e.g. 'BOS -4.5')."""
+    if val is None or pd.isna(val):
+        return "—"
+    v = float(val)
+    if abs(v) < 0.05:
+        return "EVEN"
+    return f"{home} -{abs(v):.1f}" if v > 0 else f"{away} -{abs(v):.1f}"
+
+
+def fmt_price(p):
+    return "—" if p is None or pd.isna(p) else (f"+{int(p)}" if p > 0 else f"{int(p)}")
+
+
+def _clean(value, default, lo, hi, cast=float):
+    try:
+        v = cast(round(float(value)) if cast is int else float(value))
+    except (TypeError, ValueError):
+        return default
+    return default if not np.isfinite(v) else max(lo, min(hi, v))
+
+
+# =============================================================================
+# PIPELINES
+# =============================================================================
+def run_training_pipeline(set_progress):
+    set_progress("Loading historical stats and odds...")
+    hist, odds = load_data(fresh=True)
+    final = hist["home_points"].notna()
+    prior = core.league_prior(hist[final])
+    feats = attach_lines(core.build_features(hist, prior), odds)
+    train = feats[feats["total_points"].notna()].reset_index(drop=True)
+    upcoming = feats[feats["total_points"].isna()]
+    if train.empty:
+        raise RuntimeError("No completed games to train on.")
+    train_c = train.dropna(subset=["line_total", "line_implied_home_margin"]).reset_index(drop=True)
+
+    tot_std = models.Standardizer(models.TOTAL_COVS).fit(train)
+    mar_std = models.Standardizer(models.MARGIN_COVS).fit(train)
+    center = float(train["exp_total"].mean())
+    # Every team of the latest season gets a rating slot, so tomorrow's games can be predicted
+    # without retraining even when a team has not appeared in an upcoming row yet.
+    latest = sorted(feats["season"].unique())[-1]
+    teams = sorted(set(feats["home_team"]) | set(feats["away_team"]))
+    all_latest = pd.DataFrame({"season": latest, "home_team": teams, "away_team": teams})
+    index = models.team_index([train, upcoming, all_latest])
+    sampler = models.resolve_sampler(NUTS_SAMPLER)
+
+    set_progress(f"Training Model A (pace × efficiency) on {len(train)} games with {sampler} NUTS...")
+    idata_a = models.sample(models.model_a(train, tot_std, mar_std, center), DRAWS, TUNE, CHAINS, TRAIN_SEED, NUTS_SAMPLER)
+    idata_a.to_netcdf(str(STATE_DIR / "model_a.nc"))
+    set_progress(f"Training Model B (team strength, {len(index['keys'])} team-seasons)...")
+    idata_b = models.sample(models.model_b(train, index), DRAWS, TUNE, CHAINS, TRAIN_SEED + 1, NUTS_SAMPLER)
+    idata_b.to_netcdf(str(STATE_DIR / "model_b.nc"))
+    set_progress(f"Training Model C (market-anchored) on {len(train_c)} games with lines"
+                 + (" — priors only until graded lines exist" if train_c.empty else "") + "...")
+    idata_c = models.sample(models.model_c(train_c, tot_std, mar_std), DRAWS, TUNE, CHAINS, TRAIN_SEED + 2, NUTS_SAMPLER)
+    idata_c.to_netcdf(str(STATE_DIR / "model_c.nc"))
+
+    with open(BUNDLE_PATH, "wb") as f:
+        pickle.dump({"prior": prior, "tot_std": tot_std.get_state(), "mar_std": mar_std.get_state(),
+                     "center": center, "index": index, "n_train": len(train), "n_train_c": len(train_c),
+                     "trained_at": pd.Timestamp.now(tz="UTC").isoformat()}, f)
+    set_progress(f"Training complete: {len(train)} games (A, B), {len(train_c)} with lines (C).")
+    return {"ok": True}
+
+
+def load_bps(set_progress, n_particles, delta, beta):
+    if BPS_BUNDLE_PATH.exists():
+        try:
+            with open(BPS_BUNDLE_PATH, "rb") as f:
+                b = pickle.load(f)
+            ft = core.BPSFilter.from_state(b["total"]["state"], seed=BPS_SEED + 1)
+            fm = core.BPSFilter.from_state(b["margin"]["state"], seed=BPS_SEED + 2)
+            tt, tm = b["total"]["theta_mean"], b["margin"]["theta_mean"]
+            set_progress(f"Loaded BPS (p={ft.n}). Totals θ=[{tt[0]:.2f}, A={tt[1]:.2f}, B={tt[2]:.2f}, C={tt[3]:.2f}] "
+                         f"Margins θ=[{tm[0]:.2f}, A={tm[1]:.2f}, B={tm[2]:.2f}, C={tm[3]:.2f}]")
+            return ft, fm
+        except Exception as e:
+            LOG.warning("Could not load BPS bundle (%s); using prior filters.", e)
+    set_progress(f"No fitted BPS yet — equal-weight (⅓ each) synthesis with p={n_particles}. "
+                 "Run step 2 once predicted games are graded.")
+    return (core.BPSFilter(3, n_particles, delta, beta, core.BPS_FALLBACK_OBS_VAR["total"], BPS_SEED + 1),
+            core.BPSFilter(3, n_particles, delta, beta, core.BPS_FALLBACK_OBS_VAR["margin"], BPS_SEED + 2))
+
+
+def run_bps_pipeline(set_progress, n_particles, delta, beta):
+    n_particles = _clean(n_particles, core.BPS_DEFAULTS["particles"], 50, 20000, int)
+    delta = _clean(delta, core.BPS_DEFAULTS["delta"], 0.5, 1.0)
+    beta = _clean(beta, core.BPS_DEFAULTS["beta"], 0.5, 1.0)
+    if not PREDICTIONS_HISTORY_PATH.exists():
+        raise RuntimeError("No predictions_history.csv yet. Run predictions for a few days and let the games finish.")
+    hist, odds = load_data(fresh=True)
+    graded = prepare_graded_history(pd.read_csv(PREDICTIONS_HISTORY_PATH, dtype={"game_id": str}), hist, odds)
+    if graded is None or graded.empty:
+        raise RuntimeError("None of the logged predictions have final scores yet.")
+    set_progress(f"{len(graded)} graded predictions. Filtering totals (p={n_particles}, δ={delta:g}, β={beta:g})...")
+    tot = core.fit_bps(graded, [f"{a}_total_mean" for a in AGENTS], [f"{a}_total_std" for a in AGENTS],
+                       "actual_total", n_particles, delta, beta, BPS_SEED + 1)
+    set_progress("Filtering margins...")
+    mar = core.fit_bps(graded, [f"{a}_margin_mean" for a in AGENTS], [f"{a}_margin_std" for a in AGENTS],
+                       "actual_margin", n_particles, delta, beta, BPS_SEED + 2)
+    with open(BPS_BUNDLE_PATH, "wb") as f:
+        pickle.dump({"total": tot, "margin": mar, "n_particles": n_particles, "delta": delta, "beta": beta}, f)
+    tt, tm = tot["theta_mean"], mar["theta_mean"]
+    set_progress(f"BPS complete. Totals θ: int={tt[0]:.2f}, A={tt[1]:.2f}, B={tt[2]:.2f}, C={tt[3]:.2f}, "
+                 f"σ={tot['vol_sd']:.1f} (n={tot['n_obs']}, ESS={tot['ess']:.0f}) | Margins θ: int={tm[0]:.2f}, "
+                 f"A={tm[1]:.2f}, B={tm[2]:.2f}, C={tm[3]:.2f}, σ={mar['vol_sd']:.1f} (n={mar['n_obs']})")
+    return {"ok": True}
+
+
+def edge_tier(z):
+    if pd.isna(z):
+        return "No Line"
+    a = abs(z)
+    return "★★★ Strong" if a >= 1.5 else "★★☆ Moderate" if a >= 0.75 else "★☆☆ Slight"
+
+
+HISTORY_COLS = (["game_id", "game_date", "season", "home_team", "away_team"]
+                + [f"{a}_{m}_{s}" for a in AGENTS for m in ("total", "margin") for s in ("mean", "std")]
+                + ["combined_total_mean", "combined_total_median", "combined_total_std",
+                   "combined_margin_mean", "combined_margin_median", "combined_margin_std",
+                   "line_total", "line_spread_home", "line_implied_home_margin",
+                   "over_price", "under_price", "best_over_price", "best_under_price",
+                   "home_price", "away_price", "best_home_price", "best_away_price",
+                   "edge_total", "edge_margin", "edge_total_z", "edge_margin_z", "total_tier", "spread_tier",
+                   "model_prob_over", "model_prob_home_cover", "total_draws_json", "margin_draws_json", "predicted_at"])
+
+
+def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, delta, beta):
+    n_samples = _clean(n_samples, core.BPS_DEFAULTS["samples"], 200, 100000, int)
+    n_particles = _clean(n_particles, core.BPS_DEFAULTS["particles"], 50, 20000, int)
+    delta = _clean(delta, core.BPS_DEFAULTS["delta"], 0.5, 1.0)
+    beta = _clean(beta, core.BPS_DEFAULTS["beta"], 0.5, 1.0)
+    if not BUNDLE_PATH.exists():
+        raise RuntimeError("No trained models yet. Run step 1 first.")
+    with open(BUNDLE_PATH, "rb") as f:
+        bundle = pickle.load(f)
+    tot_std = models.Standardizer.from_state(bundle["tot_std"])
+    mar_std = models.Standardizer.from_state(bundle["mar_std"])
+
+    set_progress("Loading today's matchups and lines...")
+    hist, odds = load_data(fresh=True)
+    feats = attach_lines(core.build_features(hist, bundle["prior"]), odds)
+    open_games = feats[feats["total_points"].isna()]
+    today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    target = str(game_date)[:10] if game_date else today
+    slate = open_games[open_games["game_date"] == target]
+    if slate.empty:
+        later = sorted(d for d in open_games["game_date"].unique() if d >= today)
+        if not later:
+            raise RuntimeError(f"No unplayed games on {target}. The data pipeline adds each day's games overnight.")
+        target = later[0]
+        slate = open_games[open_games["game_date"] == target]
+    slate = slate.reset_index(drop=True)
+    known = {tuple(k) for k in bundle["index"]["keys"]}
+    unknown = [f"{a}@{h}" for s, h, a in zip(slate["season"], slate["home_team"], slate["away_team"])
+               if (s, h) not in known or (s, a) not in known]
+    if unknown:
+        raise RuntimeError(f"Teams not in the trained model ({', '.join(unknown)}). Re-run step 1.")
+
+    rng = np.random.default_rng(BPS_SEED + int(pd.Timestamp(target).strftime("%Y%m%d")))
+    set_progress(f"Forecasting {len(slate)} games on {target} with Models A, B and C...")
+    draws = {
+        "A": models.predict_a(az.from_netcdf(str(STATE_DIR / "model_a.nc")), slate, tot_std, mar_std, bundle["center"], rng),
+        "B": models.predict_b(az.from_netcdf(str(STATE_DIR / "model_b.nc")), slate, bundle["index"], rng),
+        "C": models.predict_c(az.from_netcdf(str(STATE_DIR / "model_c.nc")), slate, tot_std, mar_std, rng),
+    }
+    out = slate[["game_id", "game_date", "season", "home_team", "away_team", "line_total", "line_spread_home",
+                 "line_implied_home_margin", "over_price", "under_price", "best_over_price", "best_under_price",
+                 "home_price", "away_price", "best_home_price", "best_away_price"]].copy()
+    for a, (tot, mar) in draws.items():
+        out[f"{a}_total_mean"], out[f"{a}_total_std"] = tot.mean(0), tot.std(0)
+        out[f"{a}_margin_mean"], out[f"{a}_margin_std"] = mar.mean(0), mar.std(0)
+
+    flt_t, flt_m = load_bps(set_progress, n_particles, delta, beta)
+    set_progress(f"Synthesizing BPS draws ({n_samples:,} per game per market)...")
+    recs = []
+    for i, r in out.iterrows():
+        mu_t = [r[f"{a}_total_mean"] for a in AGENTS]
+        mu_m = [r[f"{a}_margin_mean"] for a in AGENTS]
+        rec = {}
+        if np.all(np.isfinite(mu_t)) and np.all(np.isfinite(mu_m)):
+            pool_t = flt_t.predict(mu_t, [r[f"{a}_total_std"] for a in AGENTS], n_samples)["draws"]
+            pool_m = flt_m.predict(mu_m, [r[f"{a}_margin_std"] for a in AGENTS], n_samples)["draws"]
+            for name, pool, line in (("total", pool_t, r["line_total"]), ("margin", pool_m, r["line_implied_home_margin"])):
+                rec[f"combined_{name}_mean"] = float(pool.mean())
+                rec[f"combined_{name}_median"] = float(np.median(pool))
+                rec[f"combined_{name}_std"] = float(pool.std())
+                rec[f"edge_{name}"] = float(pool.mean() - line) if pd.notna(line) else np.nan
+                rec[f"edge_{name}_z"] = rec[f"edge_{name}"] / float(pool.std()) if pd.notna(line) else np.nan
+                rec[f"{name}_draws_json"] = json.dumps(np.round(pool[:MAX_STORED_DRAWS], 1).tolist())
+            rec["model_prob_over"] = float((pool_t > r["line_total"]).mean()) if pd.notna(r["line_total"]) else np.nan
+            rec["model_prob_home_cover"] = (float((pool_m > r["line_implied_home_margin"]).mean())
+                                            if pd.notna(r["line_implied_home_margin"]) else np.nan)
+        recs.append(rec)
+    out = pd.concat([out, pd.DataFrame(recs, index=out.index)], axis=1)
+    for c in HISTORY_COLS:
+        if c not in out.columns:
+            out[c] = np.nan
+    out["total_tier"] = out["edge_total_z"].apply(edge_tier)
+    out["spread_tier"] = out["edge_margin_z"].apply(edge_tier)
+    out["predicted_at"] = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    set_progress("Saving prediction history...")
+    new = out[HISTORY_COLS]
+    if PREDICTIONS_HISTORY_PATH.exists():
+        old = pd.read_csv(PREDICTIONS_HISTORY_PATH, dtype={"game_id": str})
+        new = pd.concat([old, new], ignore_index=True).sort_values("predicted_at").drop_duplicates("game_id", keep="last")
+    new.to_csv(PREDICTIONS_HISTORY_PATH, index=False)
+    n_blend = int(out["combined_total_mean"].notna().sum())
+    set_progress(f"Predictions complete for {target}: {len(out)} games, {n_blend} with a line (BPS blend needs Model C, which needs the line).")
+    return {"ok": True, "date": target, "data": out.to_json(orient="records")}
+
+
+# =============================================================================
+# GRADING
+# =============================================================================
+_GRADED_CACHE: dict = {}
+
+
+def _sorted_draws(raw):
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)) or raw == "":
+        return None
+    try:
+        a = np.asarray(json.loads(raw), dtype=float)
+    except (ValueError, TypeError):
+        return None
+    a = a[np.isfinite(a)]
+    return np.sort(a) if a.size else None
+
+
+def prepare_graded_history(history: pd.DataFrame, hist: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame | None:
+    """Prediction log + final scores + closing lines + results, with draws parsed once."""
+    if history is None or history.empty:
+        return None
+    key = (int(pd.util.hash_pandas_object(history, index=False).sum()), len(hist), len(odds))
+    if key in _GRADED_CACHE:
+        return _GRADED_CACHE[key]
+    finals = hist.loc[hist["home_points"].notna(), ["game_id", "home_points", "away_points"]].copy()
+    finals["game_id"] = finals["game_id"].astype(str)
+    close = core.market_lines(odds, "closing")[["game_id", "line_total", "line_spread_home"]]
+    close = close.rename(columns={"line_total": "close_total", "line_spread_home": "close_spread_home"})
+    h = history.copy()
+    h["game_id"] = h["game_id"].astype(str)
+    g = h.merge(finals, on="game_id", how="inner").merge(close, on="game_id", how="left")
+    if g.empty:
+        _GRADED_CACHE[key] = None
+        return None
+    g["close_implied_home_margin"] = -g["close_spread_home"]
+    g["actual_total"] = g["home_points"] + g["away_points"]
+    g["actual_margin"] = g["home_points"] - g["away_points"]
+    g["total_result"] = [core.total_result(a, l) for a, l in zip(g["actual_total"], g["line_total"])]
+    g["spread_result"] = [core.spread_result(a, l) for a, l in zip(g["actual_margin"], g["line_spread_home"])]
+    g["_total_sorted"] = g["total_draws_json"].map(_sorted_draws)
+    g["_margin_sorted"] = g["margin_draws_json"].map(_sorted_draws)
+    g = g.reset_index(drop=True)
+    if len(_GRADED_CACHE) > 8:
+        _GRADED_CACHE.clear()
+    _GRADED_CACHE[key] = g
+    return g
+
+
+def directional_confusion(df, pred_col, actual_col, line_col):
+    """2x2 of predicted side vs actual side of the book line; pushes and on-the-line excluded."""
+    if any(c not in df.columns for c in (pred_col, actual_col, line_col)):
+        return {"cm": np.zeros((2, 2), dtype=int), "n": 0, "pushes": 0, "no_call": 0}
+    v = df.dropna(subset=[pred_col, actual_col, line_col])
+    pushes = int((v[actual_col] == v[line_col]).sum())
+    v = v[v[actual_col] != v[line_col]]
+    no_call = int((v[pred_col] == v[line_col]).sum())
+    v = v[v[pred_col] != v[line_col]]
+    p_hi, a_hi = (v[pred_col] > v[line_col]).to_numpy(), (v[actual_col] > v[line_col]).to_numpy()
+    cm = np.array([[np.sum(a_hi & p_hi), np.sum(a_hi & ~p_hi)], [np.sum(~a_hi & p_hi), np.sum(~a_hi & ~p_hi)]], dtype=int)
+    return {"cm": cm, "n": int(cm.sum()), "pushes": pushes, "no_call": no_call}
+
+
+def confusion_heatmap(cm, x_labels, y_labels, title, x_title="Model call", y_title="Actual result"):
+    cm = np.asarray(cm, dtype=float)
+    col_tot = cm.sum(axis=0, keepdims=True)
+    col_pct = np.divide(cm, col_tot, out=np.full_like(cm, np.nan), where=col_tot > 0) * 100
+    zmax = max(cm.max(), 1.0)
+    fig = go.Figure(go.Heatmap(z=cm, x=x_labels, y=y_labels, zmin=0, zmax=zmax, colorscale=HEATMAP_SCALE,
+                               showscale=False, xgap=2, ygap=2, customdata=col_pct,
+                               hovertemplate="Actual: %{y}<br>Call: %{x}<br><b>%{z:.0f} games</b><br>%{customdata:.1f}% of this call<extra></extra>"))
+    for i, y in enumerate(y_labels):
+        for j, x in enumerate(x_labels):
+            dark = cm[i, j] / zmax > 0.55
+            pct = f"{col_pct[i, j]:.0f}% of {x} calls" if np.isfinite(col_pct[i, j]) else "—"
+            fig.add_annotation(x=x, y=y, showarrow=False, text=f"<b>{int(cm[i, j])}</b><br><span style='font-size:11px'>{pct}</span>",
+                               font=dict(size=18, color=theme["card_bg"] if dark else theme["text_main"], family=theme["font"]))
+    apply_plotly_theme(fig, title)
+    fig.update_layout(height=340, margin=dict(t=56, b=56, l=110, r=24))
+    fig.update_xaxes(title_text=x_title, showgrid=False, type="category")
+    fig.update_yaxes(title_text=y_title, autorange="reversed", showgrid=False, type="category")
+    return fig
+
+
+CM_MODEL_OPTIONS = {
+    "bps_median": ("BPS Blend (Median)", "combined_total_median", "combined_margin_median"),
+    "bps_mean": ("BPS Blend (Mean)", "combined_total_mean", "combined_margin_mean"),
+    **{f"agent_{a}": (AGENT_NAMES[a], f"{a}_total_mean", f"{a}_margin_mean") for a in AGENTS},
+}
+
+
+def confusion_section(graded, model_key):
+    label, tot_col, mar_col = CM_MODEL_OPTIONS.get(model_key, CM_MODEL_OPTIONS["bps_median"])
+    if graded is None or graded.empty:
+        return empty_state("No graded games yet.", "Confusion matrices appear once predicted games have final scores.")
+    panels = []
+    for res, title, labels in [
+        (directional_confusion(graded, tot_col, "actual_total", "line_total"), "Totals — Over / Under", ["Over", "Under"]),
+        (directional_confusion(graded, mar_col, "actual_margin", "line_implied_home_margin"), "Spreads — Against the Spread", ["Home covers", "Away covers"]),
+    ]:
+        cm, n = res["cm"], res["n"]
+        hits = cm[0, 0] + cm[1, 1]
+        summary = f"Hit rate {hits / n * 100:.1f}% of {n}" if n else "No graded games with a line."
+        if res["pushes"] or res["no_call"]:
+            summary += f" · excluded: {res['pushes']} pushes, {res['no_call']} on the line"
+        panels.append(html.Div([dcc.Graph(figure=confusion_heatmap(cm, labels, labels, title), config={"displayModeBar": False}),
+                                html.P(summary, style={"fontSize": "12.5px", "color": theme["text_main"], "margin": "4px 0 0 0"})],
+                               style={"flex": 1, "minWidth": "340px", "padding": "16px", "backgroundColor": theme["card_bg"], "borderRadius": "12px"}))
+    return html.Div([html.H4(f"Calls vs. Book — {label}", style={"color": theme["colors"][4], "fontSize": "15px", "margin": "0 0 12px 0"}),
+                     html.Div(panels, style={"display": "flex", "gap": "20px", "flexWrap": "wrap"})],
+                    style={"padding": "20px", "backgroundColor": theme["grid"], "borderRadius": "12px", "marginBottom": "32px"})
+
+
+def brier_skill(graded, p_col, result_col, yes, no, price_yes, price_no):
+    """Brier skill of the model's probability vs the de-vigged market from that game's own prices."""
+    if graded is None or graded.empty or p_col not in graded.columns:
+        return np.nan, 0
+    g = graded[graded[result_col].isin([yes, no])].copy()
+    g["p_mkt"] = core.devig_pair(g[price_yes].fillna(-110), g[price_no].fillna(-110)).values
+    g = g.dropna(subset=[p_col, "p_mkt"])
+    if g.empty:
+        return np.nan, 0
+    y = (g[result_col] == yes).astype(float)
+    base = float(((g["p_mkt"] - y) ** 2).mean())
+    return (1 - float(((g[p_col] - y) ** 2).mean()) / base if base > 0 else np.nan), len(g)
+
+
+def moneyball_sweep(prep, rule="interval"):
+    """Backtest across interval levels (interval rule) or EV thresholds (EV rule)."""
+    rows = []
+    levels = np.arange(0.50, 0.8001, 0.025) if rule == "interval" else np.arange(0.0, 0.1001, 0.01)
+    for lvl in levels:
+        res = (core.backtest(prep, float(lvl)) if rule == "interval"
+               else core.backtest(prep, rule="ev", min_ev=float(lvl)))
+        if res.get("empty"):
+            continue
+        rows.append({"Level": lvl * 100,
+                     **{f"{m.title()} {k}": res[m][key] for m in ("total", "spread")
+                        for k, key in (("Selectivity", "selectivity"), ("Win Rate", "win_rate"),
+                                       ("ROI", "roi"), ("Breakeven", "breakeven"))}})
+    return pd.DataFrame(rows)
+
+
+def sweep_figure(sweep, market, level, rule="interval"):
+    m = market.title()
+    fig = go.Figure()
+    for col, name, color in ((f"{m} Selectivity", "Selectivity (% of games bet)", theme["colors"][1]),
+                             (f"{m} Win Rate", "Win rate (%)", theme["colors"][4]),
+                             (f"{m} ROI", "ROI (%)", theme["colors"][3])):
+        fig.add_trace(go.Scatter(x=sweep["Level"], y=sweep[col], name=name, mode="lines+markers",
+                                 line=dict(color=color, width=2), marker=dict(size=7)))
+    be = sweep[f"{m} Breakeven"].dropna()
+    fig.add_hline(y=float(be.mean()) if len(be) else 52.38, line_dash="dot", line_color=theme["negative"],
+                  annotation_text="Breakeven win rate at the prices taken")
+    fig.add_hline(y=0, line_color=theme["grid"])
+    fig.add_vline(x=level * 100, line_dash="dash", line_color=theme["colors"][4], annotation_text="Current")
+    x_title = "Credible interval level (%)" if rule == "interval" else "Minimum EV per unit staked (%)"
+    fig.update_layout(xaxis_title=x_title, yaxis=dict(title="%"), hovermode="x unified")
+    what = "width" if rule == "interval" else "EV threshold"
+    return apply_plotly_theme(fig, f"{'Totals' if market == 'total' else 'Spreads'} — results by {what}").update_layout(height=360)
+
+
+# =============================================================================
+# DASH APP
+# =============================================================================
+app = Dash(__name__, background_callback_manager=DiskcacheManager(diskcache.Cache(str(Path("/tmp/nba_dash_cache")))),
+           suppress_callback_exceptions=True, title="NBA Projections")
+app.index_string = f"""<!DOCTYPE html><html><head>{{%metas%}}<title>{{%title%}}</title>{{%favicon%}}{{%css%}}
+<style>html, body {{ background-color: {theme['page_bg']}; margin: 0 !important; padding: 0 !important; }}
+* {{ box-sizing: border-box; }}</style></head><body>{{%app_entry%}}<footer>{{%config%}}{{%scripts%}}{{%renderer%}}</footer></body></html>"""
+
+
+def _num_input(id_, value, lo, hi, step):
+    return dcc.Input(id=id_, type="number", min=lo, max=hi, step=step, value=value, debounce=True, style=INPUT_STYLE)
+
+
+tab1_layout = html.Div([
+    html.Div([html.Button("1 · Train Models", id="train-btn", n_clicks=0, style=BTN_STYLE),
+              html.Button("2 · Optimize BPS Mixture", id="bps-btn", n_clicks=0, style=BTN_STYLE),
+              html.Button("3 · Predict Slate", id="predict-btn", n_clicks=0, style=BTN_STYLE_SECONDARY)],
+             style={"marginBottom": "16px"}),
+    html.Div([html.Span("Game date: ", style=CONTROL_LABEL_STYLE),
+              dcc.Input(id="pred-date", type="text", placeholder="today (YYYY-MM-DD)", debounce=True,
+                        style={**INPUT_STYLE, "width": "170px"}),
+              html.Span("BPS particles (p): ", style=CONTROL_LABEL_STYLE),
+              _num_input("bps-particles", core.BPS_DEFAULTS["particles"], 50, 20000, 50),
+              html.Span("State discount (δ): ", style=CONTROL_LABEL_STYLE),
+              _num_input("bps-delta", core.BPS_DEFAULTS["delta"], 0.5, 1.0, 0.005),
+              html.Span("Volatility discount (β): ", style=CONTROL_LABEL_STYLE),
+              _num_input("bps-beta", core.BPS_DEFAULTS["beta"], 0.5, 1.0, 0.005),
+              html.Span("Draws per game: ", style=CONTROL_LABEL_STYLE),
+              _num_input("pred-samples", core.BPS_DEFAULTS["samples"], 200, 100000, 100)],
+             style={"marginBottom": "16px", "display": "flex", "flexWrap": "wrap", "alignItems": "center", "rowGap": "10px"}),
+    html.Div([html.Div(id=i, style=STATUS_STYLE) for i in ("train-status", "bps-status", "predict-status")]),
+    html.Div([html.Span("Projection basis: ", style=CONTROL_LABEL_STYLE),
+              dcc.RadioItems(id="proj-basis-toggle", value="median", inline=True,
+                             options=[{"label": " Median", "value": "median"}, {"label": " Mean", "value": "mean"}],
+                             labelStyle={"color": theme["card_bg"], "marginRight": "20px", "fontWeight": "600"})],
+             style={"margin": "12px 0 20px 0"}),
+    dcc.Store(id="train-store", storage_type="session"),
+    dcc.Store(id="bps-store", storage_type="session"),
+    dcc.Store(id="predictions-store", storage_type="session"),
+    html.Div(id="dash-results"),
+])
+
+tab2_layout = html.Div([
+    html.Div([html.Button("Refresh Ledger", id="refresh-history-btn", n_clicks=0, style=BTN_STYLE),
+              html.Span("Confusion matrix model: ", style={**CONTROL_LABEL_STYLE, "marginLeft": "12px"}),
+              dcc.Dropdown(id="cm-model-dropdown", value="bps_median", clearable=False, searchable=False,
+                           options=[{"label": v[0], "value": k} for k, v in CM_MODEL_OPTIONS.items()],
+                           style={"width": "300px", "color": theme["text_main"]})],
+             style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": "8px"}),
+    dcc.Loading(html.Div(id="performance-results", style={"marginTop": "24px"})),
+])
+
+tab3_layout = html.Div([
+    html.Div([
+        html.Div([html.Label("Bet rule", style={"fontWeight": "700", "marginRight": "16px", "color": theme["text_main"]}),
+                  dcc.RadioItems(id="moneyball-rule", value="ev", inline=True,
+                                 options=[{"label": " Expected value (price-aware)", "value": "ev"},
+                                          {"label": " Credible interval (original)", "value": "interval"}],
+                                 labelStyle={"marginRight": "24px", "fontWeight": "600", "color": theme["text_main"]})],
+                 style={"marginBottom": "18px"}),
+        html.Div([html.Label("Minimum EV per unit staked", style={"fontWeight": "700", "color": theme["text_main"]}),
+                  dcc.Slider(id="moneyball-ev-slider", min=0, max=10, step=0.5, value=3,
+                             marks={v: f"{v}%" for v in range(0, 11, 2)}, tooltip={"placement": "bottom", "always_visible": True})],
+                 id="ev-slider-box", style={"marginBottom": "12px"}),
+        html.Div([html.Label("Credible interval width", style={"fontWeight": "700", "color": theme["text_main"]}),
+                  dcc.Slider(id="moneyball-ci-slider", min=50, max=80, step=2.5, value=55,
+                             marks={v: f"{v}%" for v in range(50, 81, 5)}, tooltip={"placement": "bottom", "always_visible": True})],
+                 id="ci-slider-box", style={"display": "none"}),
+    ], style={**CARD_STYLE, "padding": "18px 28px 30px 28px"}),
+    dcc.Loading(html.Div(id="tab3-results")),
+])
+
+PAGE = {"padding": "36px 40px"}
+app.layout = html.Div([
+    html.Div([html.H1("NBA Projections & Insight Ledger", style={"margin": "0", "color": "#FFFDF8", "fontSize": "28px", "fontWeight": "800"}),
+              html.P("Three models, Bayesian Predictive Synthesis, and skill tracking against the market.",
+                     style={"margin": "6px 0 0 0", "color": theme["border"], "fontSize": "15px", "fontWeight": "600"})],
+             style={"padding": "32px 40px", "marginBottom": "12px"}),
+    dcc.Tabs(id="tabs", value="tab1", children=[
+        dcc.Tab(label="Forecast & Models", value="tab1", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+        dcc.Tab(label="Skill & Evaluation", value="tab2", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+        dcc.Tab(label="💰 Money Ball", value="tab3", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE)]),
+    html.Div(tab1_layout, id="tab1-page", style={**PAGE, "display": "block"}),
+    html.Div(tab2_layout, id="tab2-page", style={**PAGE, "display": "none"}),
+    html.Div(tab3_layout, id="tab3-page", style={**PAGE, "display": "none"}),
+], style={"fontFamily": theme["font"], "backgroundColor": theme["page_bg"], "minHeight": "100vh"})
+
+
+@app.callback(Output("tab1-page", "style"), Output("tab2-page", "style"), Output("tab3-page", "style"), Input("tabs", "value"))
+def toggle_tabs(tab):
+    return tuple({**PAGE, "display": "block" if tab == t else "none"} for t in ("tab1", "tab2", "tab3"))
+
+
+def _background(fn, label):
+    def run(set_progress, *args):
+        try:
+            return fn(lambda msg: set_progress([msg]), *args)
+        except Exception as e:
+            LOG.exception("%s failed", label)
+            set_progress([f"⚠ {label} failed: {e}"])
+            return {"ok": False, "error": str(e)}
+    return run
+
+
+@app.callback(Output("train-store", "data"), Input("train-btn", "n_clicks"), background=True,
+              running=[(Output("train-btn", "disabled"), True, False)], progress=[Output("train-status", "children")],
+              prevent_initial_call=True)
+def train_callback(set_progress, _):
+    return _background(run_training_pipeline, "Training")(set_progress)
+
+
+@app.callback(Output("bps-store", "data"), Input("bps-btn", "n_clicks"),
+              State("bps-particles", "value"), State("bps-delta", "value"), State("bps-beta", "value"),
+              background=True, running=[(Output("bps-btn", "disabled"), True, False)],
+              progress=[Output("bps-status", "children")], prevent_initial_call=True)
+def bps_callback(set_progress, _, p, d, b):
+    return _background(run_bps_pipeline, "BPS")(set_progress, p, d, b)
+
+
+@app.callback(Output("predictions-store", "data"), Input("predict-btn", "n_clicks"),
+              State("pred-date", "value"), State("pred-samples", "value"), State("bps-particles", "value"),
+              State("bps-delta", "value"), State("bps-beta", "value"),
+              background=True, running=[(Output("predict-btn", "disabled"), True, False)],
+              progress=[Output("predict-status", "children")], prevent_initial_call=True)
+def predict_callback(set_progress, _, gdate, n, p, d, b):
+    return _background(run_predictions_pipeline, "Prediction")(set_progress, gdate, n, p, d, b)
+
+
+@app.callback(Output("dash-results", "children"), Input("predictions-store", "data"), Input("proj-basis-toggle", "value"))
+def render_results(store, basis):
+    if not store:
+        return ""
+    if not store.get("ok"):
+        return error_state("Prediction pipeline failed", store.get("error", "Unknown error"))
+    df = pd.read_json(io.StringIO(store["data"]), orient="records", dtype={"game_id": str})
+    if df.empty:
+        return empty_state("No games to show.")
+    df["Game"] = df["away_team"] + " @ " + df["home_team"]
+    tot_col, mar_col = f"combined_total_{basis}", f"combined_margin_{basis}"
+    tot = pd.DataFrame({"Game": df["Game"],
+                        **{AGENT_NAMES[a]: df[f"{a}_total_mean"].round(1) for a in AGENTS},
+                        f"BPS ({basis.title()})": df[tot_col].round(1),
+                        "Line": df["line_total"],
+                        "P(Over)": (df["model_prob_over"] * 100).round(1),
+                        "Best Over / Under": [f"{fmt_price(o)} / {fmt_price(u)}" for o, u in zip(df["best_over_price"], df["best_under_price"])],
+                        "Edge": df["total_tier"]})
+    spr = pd.DataFrame({"Game": df["Game"],
+                        **{AGENT_NAMES[a]: [format_spread_val(v, h, w) for v, h, w in zip(df[f"{a}_margin_mean"], df["home_team"], df["away_team"])] for a in AGENTS},
+                        f"BPS ({basis.title()})": [format_spread_val(v, h, w) for v, h, w in zip(df[mar_col], df["home_team"], df["away_team"])],
+                        "Line": [format_spread_val(v, h, w) for v, h, w in zip(df["line_implied_home_margin"], df["home_team"], df["away_team"])],
+                        "P(Home Covers)": (df["model_prob_home_cover"] * 100).round(1),
+                        "Best Home / Away": [f"{fmt_price(o)} / {fmt_price(u)}" for o, u in zip(df["best_home_price"], df["best_away_price"])],
+                        "Edge": df["spread_tier"]})
+    bold = [{"if": {"column_id": f"BPS ({basis.title()})"}, "fontWeight": "bold", "backgroundColor": "#f9f3ea"}]
+    return html.Div([
+        html.H3(f"Totals — {store.get('date', '')}", style={"color": theme["card_bg"], "marginBottom": "8px"}),
+        html.Div(table(tot, cond=bold), style={"marginBottom": "32px", "overflowX": "auto"}),
+        html.H3("Spreads", style={"color": theme["card_bg"], "marginBottom": "8px"}),
+        html.P("Each model forecasts both markets. Spreads name the favorite (BOS -4.5 = Boston by 4.5).",
+               style={"color": theme["border"], "fontSize": "13px", "marginTop": "0"}),
+        html.Div(table(spr, cond=bold), style={"overflowX": "auto"}),
+    ])
+
+
+def _accuracy_rows(graded, market):
+    actual, line = ("actual_total", "line_total") if market == "total" else ("actual_margin", "line_implied_home_margin")
+    rows = []
+    for name, col in [(AGENT_NAMES[a], f"{a}_{market}_mean") for a in AGENTS] + \
+                     [("BPS Blend (Mean)", f"combined_{market}_mean"), ("BPS Blend (Median)", f"combined_{market}_median")]:
+        v = graded.dropna(subset=[col, actual]) if col in graded.columns else graded.iloc[0:0]
+        res = directional_confusion(graded, col, actual, line)
+        win = (res["cm"][0, 0] + res["cm"][1, 1]) / res["n"] * 100 if res["n"] else np.nan
+        rows.append({"Model": name,
+                     "MAE": round(float((v[col] - v[actual]).abs().mean()), 2) if len(v) else "—",
+                     "Bias": round(float((v[col] - v[actual]).mean()), 2) if len(v) else "—",
+                     "Win % vs line": f"{win:.1f}%" if pd.notna(win) else "—", "Games": len(v)})
+    return pd.DataFrame(rows)
+
+
+@app.callback(Output("performance-results", "children"), Input("refresh-history-btn", "n_clicks"), Input("cm-model-dropdown", "value"))
+def render_performance(n_clicks, cm_model):
+    if not PREDICTIONS_HISTORY_PATH.exists():
+        return empty_state("No prediction history yet.", "It builds up each time you run predictions.")
+    history = pd.read_csv(PREDICTIONS_HISTORY_PATH, dtype={"game_id": str})
+    hist, odds = load_data(fresh=(n_clicks or 0) > 0)
+    graded = prepare_graded_history(history, hist, odds)
+    if graded is None or graded.empty:
+        return empty_state("No graded games yet.", f"{len(history)} predictions logged; they're graded once final scores land.")
+    bss_t, n_t = brier_skill(graded, "model_prob_over", "total_result", "over", "under", "over_price", "under_price")
+    bss_s, n_s = brier_skill(graded, "model_prob_home_cover", "spread_result", "home_cover", "away_cover", "home_price", "away_price")
+    bold = [{"if": {"filter_query": '{Model} contains "BPS"'}, "fontWeight": "bold", "backgroundColor": "#f9f3ea"}]
+    arch = graded.sort_values("game_date", ascending=False)
+    archive = pd.DataFrame({
+        "Date": arch["game_date"], "Game": arch["away_team"] + " @ " + arch["home_team"],
+        "Book Total": arch["line_total"], "Model Total": arch["combined_total_median"].round(1),
+        "Actual Total": arch["actual_total"], "Close Total": arch["close_total"],
+        "Book Line": [format_spread_val(v, h, a) for v, h, a in zip(arch["line_implied_home_margin"], arch["home_team"], arch["away_team"])],
+        "Model Line": [format_spread_val(v, h, a) for v, h, a in zip(arch["combined_margin_median"], arch["home_team"], arch["away_team"])],
+        "Actual": [format_spread_val(v, h, a) for v, h, a in zip(arch["actual_margin"], arch["home_team"], arch["away_team"])]})
+    return html.Div([
+        html.H3("Performance Ledger", style={"color": theme["colors"][0], "marginTop": 0, "fontWeight": "800"}),
+        html.Div([kpi_card("Totals Brier Skill", f"{bss_t:.4f}" if pd.notna(bss_t) else "—",
+                           f"P(over) vs de-vigged market at each game's prices · {n_t} games"),
+                  kpi_card("Spreads Brier Skill", f"{bss_s:.4f}" if pd.notna(bss_s) else "—",
+                           f"P(home covers) vs de-vigged market · {n_s} games")],
+                 style={"display": "flex", "gap": "24px", "marginBottom": "24px", "flexWrap": "wrap"}),
+        html.P("Above 0 means the model's probabilities beat the market's own (vig removed using both sides' prices).",
+               style={"fontSize": "12.5px", "color": theme["text_muted"], "marginTop": "-12px"}),
+        confusion_section(graded, cm_model),
+        html.Div([html.Div([html.H4("Totals accuracy by model", style={"color": theme["colors"][4], "marginTop": 0}),
+                            table(_accuracy_rows(graded, "total"), cond=bold)], style={"flex": 1, "minWidth": "320px"}),
+                  html.Div([html.H4("Spreads accuracy by model", style={"color": theme["colors"][4], "marginTop": 0}),
+                            table(_accuracy_rows(graded, "margin"), cond=bold)], style={"flex": 1, "minWidth": "320px"})],
+                 style={"display": "flex", "gap": "20px", "marginBottom": "32px", "flexWrap": "wrap"}),
+        html.H4("Game-by-game archive", style={"color": theme["colors"][4]}),
+        table(archive),
+    ], style=CARD_STYLE)
+
+
+def moneyball_live(out, market, rule, conf, min_ev):
+    """Today's calls under the selected rule. HIGH = over / home covers; LOW = under / away."""
+    lo_pct, hi_pct = core.credible_interval_bounds(conf)
+    total = market == "total"
+    rows = []
+    for _, r in out.iterrows():
+        draws = _sorted_draws(r.get(f"{market}_draws_json"))
+        line = r["line_total"] if total else r["line_implied_home_margin"]
+        px_hi, px_lo = (r["best_over_price"], r["best_under_price"]) if total else (r["best_home_price"], r["best_away_price"])
+        fmt = (lambda v: round(v, 1) if pd.notna(v) else None) if total else \
+              (lambda v, h=r["home_team"], a=r["away_team"]: format_spread_val(v, h, a))
+        row = {"Game": f"{r['away_team']} @ {r['home_team']}", "Book Line": fmt(line)}
+        if rule == "ev":
+            c = core.ev_choice(draws, line, px_hi, px_lo)
+            side = None if c is None else (c["side"] if c["ev"] >= min_ev else "NO_BET")
+            lean = None if c is None else c["side"]
+            row.update({"Lean": "—" if lean is None else (("OVER" if lean == "HIGH" else "UNDER") if total
+                                                           else (r["home_team"] if lean == "HIGH" else r["away_team"])),
+                        "P(Win)": f"{c['p_win'] * 100:.1f}%" if c else "—",
+                        "Breakeven": f"{c['breakeven'] * 100:.1f}%" if c else "—",
+                        "EV / unit": f"{c['ev'] * 100:+.1f}%" if c else "—",
+                        "Best Price": fmt_price(c["price"]) if c else "—",
+                        "¼ Kelly stake": f"{c['kelly'] * 100:.1f}% of bankroll" if c and side not in (None, "NO_BET") else "—"})
+        else:
+            lo = core.quantile_sorted(draws, lo_pct) if draws is not None else np.nan
+            hi = core.quantile_sorted(draws, hi_pct) if draws is not None else np.nan
+            side = core.side_vs_interval(line, lo, hi)
+            row.update({f"{conf * 100:.0f}% CrI Lower": fmt(lo), f"{conf * 100:.0f}% CrI Upper": fmt(hi)})
+        if side is None:
+            call, price = "No Line", np.nan
+        elif side == "NO_BET":
+            call, price = "NO BET", np.nan
+        else:
+            call = ("OVER" if side == "HIGH" else "UNDER") if total else (r["home_team"] if side == "HIGH" else r["away_team"])
+            price = px_hi if side == "HIGH" else px_lo
+        row["Call"] = call
+        if rule != "ev":
+            row["Best Price"] = fmt_price(price)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@app.callback(Output("ev-slider-box", "style"), Output("ci-slider-box", "style"), Input("moneyball-rule", "value"))
+def toggle_rule_controls(rule):
+    show, hide = {"marginBottom": "12px"}, {"display": "none"}
+    return (show, hide) if rule == "ev" else (hide, show)
+
+
+@app.callback(Output("tab3-results", "children"), Input("moneyball-rule", "value"), Input("moneyball-ci-slider", "value"),
+              Input("moneyball-ev-slider", "value"), Input("predictions-store", "data"))
+def render_moneyball(rule, ci_pct, ev_pct, store):
+    conf, min_ev = ci_pct / 100.0, ev_pct / 100.0
+    lo_pct, hi_pct = core.credible_interval_bounds(conf)
+    if rule == "ev":
+        intro = section_header("💰 Money Ball — Expected value", f"Bet a side only when its expected profit is at least {ev_pct:g}% of the stake.")
+        explain = (f"For each side, the BPS draws give the chance of winning, losing and pushing at the morning line. "
+                   f"EV per unit = P(win) × payout − P(loss), at the best price across books. The rule bets the better side "
+                   f"when its EV is at least {ev_pct:g}%. A side needs a win chance above its breakeven (52.4% at −110) just to "
+                   "reach 0%. The quarter-Kelly stake is a sizing guide, capped at 5% of bankroll. EV is only as good as the "
+                   "model's probabilities, so check the Brier skill on the Skill tab before trusting it.")
+        rule_label, current = f"EV ≥ {ev_pct:g}%", min_ev
+    else:
+        intro = section_header("💰 Money Ball — Credible interval", "Bet only when the line falls OUTSIDE the BPS credible interval.")
+        explain = (f"The {ci_pct:.0f}% interval spans the {lo_pct:.2f}th to {hi_pct:.2f}th percentile of the BPS draws. "
+                   "Line below it: OVER / home side; above it: UNDER / away side; inside: NO BET. NBA game-to-game noise "
+                   "makes this interval wide, so this rule bets rarely.")
+        rule_label, current = f"{ci_pct:.0f}% interval", conf
+    sections = [intro, html.P(explain, style={"fontSize": "13px", "color": theme["border"], "marginBottom": "24px", "maxWidth": "900px"}),
+                section_header("Today's calls", f"{rule_label} vs. the morning line")]
+    call_style = [{"if": {"filter_query": '{Call} = "NO BET"'}, "color": theme["text_muted"]},
+                  {"if": {"filter_query": '{Call} != "NO BET" && {Call} != "No Line"'}, "fontWeight": "bold", "color": theme["positive"]}]
+    if not store or not store.get("ok"):
+        sections.append(empty_state("No live predictions loaded.", "Run step 3 on the Forecast & Models tab."))
+    else:
+        out = pd.read_json(io.StringIO(store["data"]), orient="records", dtype={"game_id": str})
+        for market, label in (("total", "Totals"), ("margin", "Spreads")):
+            sections.append(html.Div(label, style={"fontWeight": "700", "marginBottom": "8px", "color": theme["card_bg"]}))
+            sections.append(html.Div(table(moneyball_live(out, market, rule, conf, min_ev), 10, call_style), style={"marginBottom": "20px"}))
+
+    sections.append(section_header("Historical backtest", f"The {rule_label} rule on graded history, flat 1-unit bets"))
+    if not PREDICTIONS_HISTORY_PATH.exists():
+        sections.append(empty_state("No prediction history yet."))
+        return html.Div(sections)
+    hist, odds = load_data(fresh=False)
+    prep = prepare_graded_history(pd.read_csv(PREDICTIONS_HISTORY_PATH, dtype={"game_id": str}), hist, odds)
+    bt = core.backtest(prep, conf, rule=rule, min_ev=min_ev)
+    if bt.get("empty"):
+        sections.append(empty_state("No graded games yet.", "Results appear once predicted games are final."))
+        return html.Div(sections)
+    cards = []
+    for m, label in (("total", "Totals"), ("spread", "Spreads")):
+        r = bt[m]
+        ev_note = f" · avg expected {r['avg_ev']:+.1f}%" if rule == "ev" and pd.notna(r["avg_ev"]) else ""
+        cards += [kpi_card(f"{label} — Bets", f"{r['n_bets']} / {r['n_games']}", f"Selectivity {r['selectivity']:.1f}%"),
+                  kpi_card(f"{label} — Win Rate", f"{r['win_rate']:.1f}%" if pd.notna(r["win_rate"]) else "—",
+                           f"breakeven {r['breakeven']:.1f}% at prices taken" if pd.notna(r["breakeven"]) else ""),
+                  kpi_card(f"{label} — Units", f"{r['units']:+.2f}", (f"ROI {r['roi']:+.1f}%" if pd.notna(r["roi"]) else "") + ev_note),
+                  kpi_card(f"{label} — CLV", f"{r['avg_clv']:+.2f} pts" if pd.notna(r["avg_clv"]) else "—",
+                           f"interval misses {r['outside_pct']:.0f}% vs {bt['nominal_outside_pct']:.0f}% nominal"
+                           if rule == "interval" and pd.notna(r["outside_pct"]) else "")]
+    sections.append(html.Div(cards, style={"display": "flex", "gap": "20px", "flexWrap": "wrap", "marginBottom": "20px"}))
+    sections.append(html.P("CLV = points the line moved toward your bet between the morning and closing snapshots. "
+                           "Consistently positive CLV is the earliest sign of a real edge, well before win rate settles. "
+                           + ("With the EV rule, compare realized ROI to the average expected EV: if ROI keeps landing well below it, "
+                              "the model's probabilities are overconfident." if rule == "ev" else ""),
+                           style={"fontSize": "12.5px", "color": theme["border"], "fontStyle": "italic", "maxWidth": "860px"}))
+    calls = bt["calls"]
+    figs = []
+    for m, (hi, lo), (c_hi, c_lo), ylab in (("total", ("over", "under"), ("OVER", "UNDER"), ["Over", "Under"]),
+                                             ("spread", ("home_cover", "away_cover"), ("Bet home", "Bet away"), ["Home covered", "Away covered"])):
+        d = calls[(calls["market"] == m) & calls["result"].isin([hi, lo])]
+        cm = np.array([[np.sum((d["call"] == s) & (d["result"] == res)) for s in ("HIGH", "NO_BET", "LOW")] for res in (hi, lo)])
+        figs.append(confusion_heatmap(cm, [c_hi, "NO BET", c_lo], ylab, f"{'Totals' if m == 'total' else 'Spreads'} — {rule_label} vs. result", x_title="Money Ball call"))
+    sections.append(html.Div([html.Div(dcc.Graph(figure=f, config={"displayModeBar": False}), style={"flex": 1, "minWidth": "380px", **CARD_STYLE}) for f in figs],
+                             style={"display": "flex", "gap": "20px", "flexWrap": "wrap"}))
+    sweep = moneyball_sweep(prep, rule)
+    if not sweep.empty:
+        sections.append(section_header("Finding the right setting",
+                                       "Selectivity, win rate and ROI across " + ("EV thresholds" if rule == "ev" else "interval levels")))
+        sections.append(html.Div([html.Div(dcc.Graph(figure=sweep_figure(sweep, m, current, rule)), style={"flex": 1, "minWidth": "380px", **CARD_STYLE})
+                                  for m in ("total", "spread")], style={"display": "flex", "gap": "20px", "flexWrap": "wrap"}))
+    return html.Div(sections)
+
+
+if __name__ == "__main__":
+    app.run(jupyter_mode=JUPYTER_MODE, debug=False) if "ipykernel" in sys.modules else app.run(debug=False, port=int(os.environ.get("PORT", 8050)))
