@@ -1,1 +1,4 @@
 game_id,season,game_type,game_date,tipoff_utc,home_team_abbreviation,away_team_abbreviation,game_status,home_points,away_points,game_label,game_sub_label,postponed
+401909088,2026-27,regular,2026-10-20,2026-10-20T19:00Z,DET,BOS,1,,,,,False
+401909089,2026-27,regular,2026-10-20,2026-10-20T23:00Z,NYK,PHI,1,,,,,False
+401909090,2026-27,regular,2026-10-20,2026-10-21T01:30Z,SAS,OKC,1,,,,,False
