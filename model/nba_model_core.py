@@ -394,16 +394,55 @@ def prob_above(sorted_draws: np.ndarray | None, line: float) -> float:
     return float(1.0 - np.searchsorted(sorted_draws, line, side="right") / sorted_draws.size)
 
 
-def backtest(prep: pd.DataFrame, conf_level: float, use_best_price: bool = True) -> dict:
-    """Money Ball rule on graded history: bet when the morning line is outside the BPS credible
-    interval. Profit is graded at the price you could have taken (best book by default) and CLV
-    against the closing line. prep needs: _total_sorted, _margin_sorted (sorted draws),
-    line_total, line_implied_home_margin, actual_total, actual_margin, total_result,
-    spread_result, price columns, close_total, close_implied_home_margin."""
+def prob_below(sorted_draws: np.ndarray | None, line: float) -> float:
+    if sorted_draws is None or pd.isna(line):
+        return np.nan
+    return float(np.searchsorted(sorted_draws, line, side="left") / sorted_draws.size)
+
+
+KELLY_FRACTION = 0.25   # quarter Kelly
+KELLY_CAP = 0.05        # never suggest more than 5% of bankroll on one bet
+
+
+def ev_choice(sorted_draws: np.ndarray | None, line: float, price_hi, price_lo) -> dict | None:
+    """Expected value per 1-unit stake of each side of a line, from the model's draws.
+
+    HIGH = over (totals) / home covers (spreads, line on the implied-home-margin scale);
+    LOW = under / away covers. A push returns the stake, so
+        EV = P(win) * (decimal - 1) - P(loss).
+    Returns the better side with its EV, win probability, the breakeven win rate at that
+    price, and a quarter-Kelly stake (fraction of bankroll, capped at KELLY_CAP)."""
+    if sorted_draws is None or pd.isna(line):
+        return None
+    p_hi, p_lo = prob_above(sorted_draws, line), prob_below(sorted_draws, line)
+    best = None
+    for side, p_win, p_loss, price in (("HIGH", p_hi, p_lo, price_hi), ("LOW", p_lo, p_hi, price_lo)):
+        price = price if pd.notna(price) else -110.0
+        b = float(american_to_decimal([price]).iloc[0]) - 1.0
+        ev = p_win * b - p_loss
+        q = p_win / (p_win + p_loss) if p_win + p_loss > 0 else 0.0   # win chance excluding pushes
+        kelly = max(0.0, (b * q - (1 - q)) / b) * KELLY_FRACTION if b > 0 else 0.0
+        cand = {"side": side, "ev": float(ev), "p_win": float(p_win), "price": float(price),
+                "breakeven": float(american_to_prob([price]).iloc[0]), "kelly": float(min(kelly, KELLY_CAP))}
+        if best is None or cand["ev"] > best["ev"]:
+            best = cand
+    return best
+
+
+def backtest(prep: pd.DataFrame, conf_level: float = 0.55, use_best_price: bool = True,
+             rule: str = "interval", min_ev: float = 0.03) -> dict:
+    """Money Ball on graded history. Two bet rules:
+      interval  bet when the morning line is outside the BPS credible interval (conf_level)
+      ev        bet the side whose expected value at the available price is at least min_ev
+                (0.03 = 3 cents per unit staked)
+    Profit is graded at the price you could have taken (best book by default) and CLV against
+    the closing line. prep needs: _total_sorted, _margin_sorted (sorted draws), line_total,
+    line_implied_home_margin, actual_total, actual_margin, total_result, spread_result, price
+    columns, close_total, close_implied_home_margin."""
     if prep is None or prep.empty:
         return {"empty": True}
     lo_pct, hi_pct = credible_interval_bounds(conf_level)
-    out = {"empty": False, "nominal_outside_pct": (1 - conf_level) * 100}
+    out = {"empty": False, "nominal_outside_pct": (1 - conf_level) * 100, "rule": rule}
     rows = []
     markets = [
         ("total", "_total_sorted", "line_total", "actual_total", "total_result", ("over", "under"),
@@ -424,7 +463,12 @@ def backtest(prep: pd.DataFrame, conf_level: float, use_best_price: bool = True)
             if pd.notna(r.get(actual_col)):
                 n_cov += 1
                 outside += int(r[actual_col] < lo or r[actual_col] > hi)
-            call = side_vs_interval(r.get(line_col), lo, hi)
+            if rule == "ev":
+                choice = ev_choice(s, r.get(line_col), r.get(hi_px), r.get(lo_px))
+                call = None if choice is None else (choice["side"] if choice["ev"] >= min_ev else "NO_BET")
+                ev = choice["ev"] if choice is not None and call != "NO_BET" else np.nan
+            else:
+                call, ev = side_vs_interval(r.get(line_col), lo, hi), np.nan
             if call is None:
                 continue
             n_usable += 1
@@ -436,7 +480,7 @@ def backtest(prep: pd.DataFrame, conf_level: float, use_best_price: bool = True)
             price = price if pd.notna(price) else -110.0
             result = r.get(result_col)
             won = None if result == "push" else (result == side)
-            bets.append({"won": won, "price": price, "profit": bet_profit(won, price),
+            bets.append({"won": won, "price": price, "profit": bet_profit(won, price), "ev": ev,
                          "clv": clv_points(market, side, r.get(line_col), r.get(close_col)),
                          "breakeven": float(american_to_prob([price]).iloc[0])})
         b = pd.DataFrame(bets)
@@ -450,6 +494,7 @@ def backtest(prep: pd.DataFrame, conf_level: float, use_best_price: bool = True)
             "units": float(b["profit"].sum()) if len(b) else 0.0,
             "roi": float(b["profit"].sum() / len(b) * 100) if len(b) else np.nan,
             "avg_clv": float(b["clv"].mean()) if len(b) and b["clv"].notna().any() else np.nan,
+            "avg_ev": float(b["ev"].mean() * 100) if len(b) and b["ev"].notna().any() else np.nan,
             "outside_pct": outside / n_cov * 100 if n_cov else np.nan,
         }
     out["calls"] = pd.DataFrame(rows, columns=["market", "game_id", "call", "result"])

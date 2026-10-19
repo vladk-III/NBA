@@ -97,7 +97,11 @@ def _load_model_modules():
     return core, models
 
 
-core, models = _load_model_modules()
+if "BPSFilter" in globals() and "model_a" in globals():
+    # Single-notebook build (NBA_Dashboard.ipynb): core and model code already live in this namespace.
+    core = models = sys.modules[__name__]
+else:
+    core, models = _load_model_modules()
 
 try:
     from google.colab import drive
@@ -584,32 +588,39 @@ def brier_skill(graded, p_col, result_col, yes, no, price_yes, price_no):
     return (1 - float(((g[p_col] - y) ** 2).mean()) / base if base > 0 else np.nan), len(g)
 
 
-def moneyball_sweep(prep, levels=None):
+def moneyball_sweep(prep, rule="interval"):
+    """Backtest across interval levels (interval rule) or EV thresholds (EV rule)."""
     rows = []
-    for lvl in (levels if levels is not None else np.arange(0.50, 0.8001, 0.025)):
-        res = core.backtest(prep, float(lvl))
+    levels = np.arange(0.50, 0.8001, 0.025) if rule == "interval" else np.arange(0.0, 0.1001, 0.01)
+    for lvl in levels:
+        res = (core.backtest(prep, float(lvl)) if rule == "interval"
+               else core.backtest(prep, rule="ev", min_ev=float(lvl)))
         if res.get("empty"):
             continue
-        rows.append({"CI Level": lvl * 100,
+        rows.append({"Level": lvl * 100,
                      **{f"{m.title()} {k}": res[m][key] for m in ("total", "spread")
                         for k, key in (("Selectivity", "selectivity"), ("Win Rate", "win_rate"),
                                        ("ROI", "roi"), ("Breakeven", "breakeven"))}})
     return pd.DataFrame(rows)
 
 
-def sweep_figure(sweep, market, level):
+def sweep_figure(sweep, market, level, rule="interval"):
     m = market.title()
     fig = go.Figure()
     for col, name, color in ((f"{m} Selectivity", "Selectivity (% of games bet)", theme["colors"][1]),
-                             (f"{m} Win Rate", "Win rate (%)", theme["colors"][4])):
-        fig.add_trace(go.Scatter(x=sweep["CI Level"], y=sweep[col], name=name, mode="lines+markers",
-                                 line=dict(color=color, width=2), marker=dict(size=8)))
+                             (f"{m} Win Rate", "Win rate (%)", theme["colors"][4]),
+                             (f"{m} ROI", "ROI (%)", theme["colors"][3])):
+        fig.add_trace(go.Scatter(x=sweep["Level"], y=sweep[col], name=name, mode="lines+markers",
+                                 line=dict(color=color, width=2), marker=dict(size=7)))
     be = sweep[f"{m} Breakeven"].dropna()
     fig.add_hline(y=float(be.mean()) if len(be) else 52.38, line_dash="dot", line_color=theme["negative"],
-                  annotation_text="Breakeven at the prices taken")
+                  annotation_text="Breakeven win rate at the prices taken")
+    fig.add_hline(y=0, line_color=theme["grid"])
     fig.add_vline(x=level * 100, line_dash="dash", line_color=theme["colors"][4], annotation_text="Current")
-    fig.update_layout(xaxis_title="Credible interval level (%)", yaxis=dict(title="%", range=[0, 100]), hovermode="x unified")
-    return apply_plotly_theme(fig, f"{'Totals' if market == 'total' else 'Spreads'} — Selectivity vs. Win Rate").update_layout(height=360)
+    x_title = "Credible interval level (%)" if rule == "interval" else "Minimum EV per unit staked (%)"
+    fig.update_layout(xaxis_title=x_title, yaxis=dict(title="%"), hovermode="x unified")
+    what = "width" if rule == "interval" else "EV threshold"
+    return apply_plotly_theme(fig, f"{'Totals' if market == 'total' else 'Spreads'} — results by {what}").update_layout(height=360)
 
 
 # =============================================================================
@@ -666,10 +677,22 @@ tab2_layout = html.Div([
 ])
 
 tab3_layout = html.Div([
-    html.Div([html.Label("Credible interval width", style={"fontWeight": "700", "marginRight": "16px", "color": theme["text_main"]}),
-              dcc.Slider(id="moneyball-ci-slider", min=50, max=80, step=2.5, value=55,
-                         marks={v: f"{v}%" for v in range(50, 81, 5)}, tooltip={"placement": "bottom", "always_visible": True})],
-             style={**CARD_STYLE, "padding": "18px 28px 30px 28px"}),
+    html.Div([
+        html.Div([html.Label("Bet rule", style={"fontWeight": "700", "marginRight": "16px", "color": theme["text_main"]}),
+                  dcc.RadioItems(id="moneyball-rule", value="ev", inline=True,
+                                 options=[{"label": " Expected value (price-aware)", "value": "ev"},
+                                          {"label": " Credible interval (original)", "value": "interval"}],
+                                 labelStyle={"marginRight": "24px", "fontWeight": "600", "color": theme["text_main"]})],
+                 style={"marginBottom": "18px"}),
+        html.Div([html.Label("Minimum EV per unit staked", style={"fontWeight": "700", "color": theme["text_main"]}),
+                  dcc.Slider(id="moneyball-ev-slider", min=0, max=10, step=0.5, value=3,
+                             marks={v: f"{v}%" for v in range(0, 11, 2)}, tooltip={"placement": "bottom", "always_visible": True})],
+                 id="ev-slider-box", style={"marginBottom": "12px"}),
+        html.Div([html.Label("Credible interval width", style={"fontWeight": "700", "color": theme["text_main"]}),
+                  dcc.Slider(id="moneyball-ci-slider", min=50, max=80, step=2.5, value=55,
+                             marks={v: f"{v}%" for v in range(50, 81, 5)}, tooltip={"placement": "bottom", "always_visible": True})],
+                 id="ci-slider-box", style={"display": "none"}),
+    ], style={**CARD_STYLE, "padding": "18px 28px 30px 28px"}),
     dcc.Loading(html.Div(id="tab3-results")),
 ])
 
@@ -820,47 +843,75 @@ def render_performance(n_clicks, cm_model):
     ], style=CARD_STYLE)
 
 
-def moneyball_live(out, conf, market):
+def moneyball_live(out, market, rule, conf, min_ev):
+    """Today's calls under the selected rule. HIGH = over / home covers; LOW = under / away."""
     lo_pct, hi_pct = core.credible_interval_bounds(conf)
+    total = market == "total"
     rows = []
     for _, r in out.iterrows():
         draws = _sorted_draws(r.get(f"{market}_draws_json"))
-        line = r["line_total"] if market == "total" else r["line_implied_home_margin"]
-        if draws is None:
-            lo = hi = np.nan
-            side = None
+        line = r["line_total"] if total else r["line_implied_home_margin"]
+        px_hi, px_lo = (r["best_over_price"], r["best_under_price"]) if total else (r["best_home_price"], r["best_away_price"])
+        fmt = (lambda v: round(v, 1) if pd.notna(v) else None) if total else \
+              (lambda v, h=r["home_team"], a=r["away_team"]: format_spread_val(v, h, a))
+        row = {"Game": f"{r['away_team']} @ {r['home_team']}", "Book Line": fmt(line)}
+        if rule == "ev":
+            c = core.ev_choice(draws, line, px_hi, px_lo)
+            side = None if c is None else (c["side"] if c["ev"] >= min_ev else "NO_BET")
+            lean = None if c is None else c["side"]
+            row.update({"Lean": "—" if lean is None else (("OVER" if lean == "HIGH" else "UNDER") if total
+                                                           else (r["home_team"] if lean == "HIGH" else r["away_team"])),
+                        "P(Win)": f"{c['p_win'] * 100:.1f}%" if c else "—",
+                        "Breakeven": f"{c['breakeven'] * 100:.1f}%" if c else "—",
+                        "EV / unit": f"{c['ev'] * 100:+.1f}%" if c else "—",
+                        "Best Price": fmt_price(c["price"]) if c else "—",
+                        "¼ Kelly stake": f"{c['kelly'] * 100:.1f}% of bankroll" if c and side not in (None, "NO_BET") else "—"})
         else:
-            lo, hi = core.quantile_sorted(draws, lo_pct), core.quantile_sorted(draws, hi_pct)
+            lo = core.quantile_sorted(draws, lo_pct) if draws is not None else np.nan
+            hi = core.quantile_sorted(draws, hi_pct) if draws is not None else np.nan
             side = core.side_vs_interval(line, lo, hi)
+            row.update({f"{conf * 100:.0f}% CrI Lower": fmt(lo), f"{conf * 100:.0f}% CrI Upper": fmt(hi)})
         if side is None:
             call, price = "No Line", np.nan
         elif side == "NO_BET":
             call, price = "NO BET", np.nan
-        elif market == "total":
-            call = "OVER" if side == "HIGH" else "UNDER"
-            price = r["best_over_price"] if side == "HIGH" else r["best_under_price"]
         else:
-            call = r["home_team"] if side == "HIGH" else r["away_team"]
-            price = r["best_home_price"] if side == "HIGH" else r["best_away_price"]
-        fmt = (lambda v: round(v, 1) if pd.notna(v) else None) if market == "total" else \
-              (lambda v, h=r["home_team"], a=r["away_team"]: format_spread_val(v, h, a))
-        rows.append({"Game": f"{r['away_team']} @ {r['home_team']}", f"{conf * 100:.0f}% CrI Lower": fmt(lo),
-                     f"{conf * 100:.0f}% CrI Upper": fmt(hi), "Book Line": fmt(line), "Call": call, "Best Price": fmt_price(price)})
+            call = ("OVER" if side == "HIGH" else "UNDER") if total else (r["home_team"] if side == "HIGH" else r["away_team"])
+            price = px_hi if side == "HIGH" else px_lo
+        row["Call"] = call
+        if rule != "ev":
+            row["Best Price"] = fmt_price(price)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
-@app.callback(Output("tab3-results", "children"), Input("moneyball-ci-slider", "value"), Input("predictions-store", "data"))
-def render_moneyball(ci_pct, store):
-    conf = ci_pct / 100.0
+@app.callback(Output("ev-slider-box", "style"), Output("ci-slider-box", "style"), Input("moneyball-rule", "value"))
+def toggle_rule_controls(rule):
+    show, hide = {"marginBottom": "12px"}, {"display": "none"}
+    return (show, hide) if rule == "ev" else (hide, show)
+
+
+@app.callback(Output("tab3-results", "children"), Input("moneyball-rule", "value"), Input("moneyball-ci-slider", "value"),
+              Input("moneyball-ev-slider", "value"), Input("predictions-store", "data"))
+def render_moneyball(rule, ci_pct, ev_pct, store):
+    conf, min_ev = ci_pct / 100.0, ev_pct / 100.0
     lo_pct, hi_pct = core.credible_interval_bounds(conf)
-    sections = [
-        section_header("💰 Money Ball", "Bet only when the line falls OUTSIDE the BPS credible interval."),
-        html.P(f"The {ci_pct:.0f}% interval spans the {lo_pct:.2f}th to {hi_pct:.2f}th percentile of the BPS draws. "
-               "Line below it: OVER / home side; above it: UNDER / away side; inside: NO BET. Bets are graded at the "
-               "best price across books, so breakeven depends on the prices actually available.",
-               style={"fontSize": "13px", "color": theme["border"], "marginBottom": "24px", "maxWidth": "880px"}),
-        section_header("Today's calls", f"{ci_pct:.0f}% credible interval vs. the morning line"),
-    ]
+    if rule == "ev":
+        intro = section_header("💰 Money Ball — Expected value", f"Bet a side only when its expected profit is at least {ev_pct:g}% of the stake.")
+        explain = (f"For each side, the BPS draws give the chance of winning, losing and pushing at the morning line. "
+                   f"EV per unit = P(win) × payout − P(loss), at the best price across books. The rule bets the better side "
+                   f"when its EV is at least {ev_pct:g}%. A side needs a win chance above its breakeven (52.4% at −110) just to "
+                   "reach 0%. The quarter-Kelly stake is a sizing guide, capped at 5% of bankroll. EV is only as good as the "
+                   "model's probabilities, so check the Brier skill on the Skill tab before trusting it.")
+        rule_label, current = f"EV ≥ {ev_pct:g}%", min_ev
+    else:
+        intro = section_header("💰 Money Ball — Credible interval", "Bet only when the line falls OUTSIDE the BPS credible interval.")
+        explain = (f"The {ci_pct:.0f}% interval spans the {lo_pct:.2f}th to {hi_pct:.2f}th percentile of the BPS draws. "
+                   "Line below it: OVER / home side; above it: UNDER / away side; inside: NO BET. NBA game-to-game noise "
+                   "makes this interval wide, so this rule bets rarely.")
+        rule_label, current = f"{ci_pct:.0f}% interval", conf
+    sections = [intro, html.P(explain, style={"fontSize": "13px", "color": theme["border"], "marginBottom": "24px", "maxWidth": "900px"}),
+                section_header("Today's calls", f"{rule_label} vs. the morning line")]
     call_style = [{"if": {"filter_query": '{Call} = "NO BET"'}, "color": theme["text_muted"]},
                   {"if": {"filter_query": '{Call} != "NO BET" && {Call} != "No Line"'}, "fontWeight": "bold", "color": theme["positive"]}]
     if not store or not store.get("ok"):
@@ -869,30 +920,34 @@ def render_moneyball(ci_pct, store):
         out = pd.read_json(io.StringIO(store["data"]), orient="records", dtype={"game_id": str})
         for market, label in (("total", "Totals"), ("margin", "Spreads")):
             sections.append(html.Div(label, style={"fontWeight": "700", "marginBottom": "8px", "color": theme["card_bg"]}))
-            sections.append(html.Div(table(moneyball_live(out, conf, market), 10, call_style), style={"marginBottom": "20px"}))
+            sections.append(html.Div(table(moneyball_live(out, market, rule, conf, min_ev), 10, call_style), style={"marginBottom": "20px"}))
 
-    sections.append(section_header("Historical backtest", f"The {ci_pct:.0f}% rule on graded history"))
+    sections.append(section_header("Historical backtest", f"The {rule_label} rule on graded history, flat 1-unit bets"))
     if not PREDICTIONS_HISTORY_PATH.exists():
         sections.append(empty_state("No prediction history yet."))
         return html.Div(sections)
     hist, odds = load_data(fresh=False)
     prep = prepare_graded_history(pd.read_csv(PREDICTIONS_HISTORY_PATH, dtype={"game_id": str}), hist, odds)
-    bt = core.backtest(prep, conf)
+    bt = core.backtest(prep, conf, rule=rule, min_ev=min_ev)
     if bt.get("empty"):
         sections.append(empty_state("No graded games yet.", "Results appear once predicted games are final."))
         return html.Div(sections)
     cards = []
     for m, label in (("total", "Totals"), ("spread", "Spreads")):
         r = bt[m]
+        ev_note = f" · avg expected {r['avg_ev']:+.1f}%" if rule == "ev" and pd.notna(r["avg_ev"]) else ""
         cards += [kpi_card(f"{label} — Bets", f"{r['n_bets']} / {r['n_games']}", f"Selectivity {r['selectivity']:.1f}%"),
                   kpi_card(f"{label} — Win Rate", f"{r['win_rate']:.1f}%" if pd.notna(r["win_rate"]) else "—",
                            f"breakeven {r['breakeven']:.1f}% at prices taken" if pd.notna(r["breakeven"]) else ""),
-                  kpi_card(f"{label} — Units", f"{r['units']:+.2f}", f"ROI {r['roi']:+.1f}%" if pd.notna(r["roi"]) else ""),
+                  kpi_card(f"{label} — Units", f"{r['units']:+.2f}", (f"ROI {r['roi']:+.1f}%" if pd.notna(r["roi"]) else "") + ev_note),
                   kpi_card(f"{label} — CLV", f"{r['avg_clv']:+.2f} pts" if pd.notna(r["avg_clv"]) else "—",
-                           f"interval misses {r['outside_pct']:.0f}% vs {bt['nominal_outside_pct']:.0f}% nominal" if pd.notna(r["outside_pct"]) else "")]
+                           f"interval misses {r['outside_pct']:.0f}% vs {bt['nominal_outside_pct']:.0f}% nominal"
+                           if rule == "interval" and pd.notna(r["outside_pct"]) else "")]
     sections.append(html.Div(cards, style={"display": "flex", "gap": "20px", "flexWrap": "wrap", "marginBottom": "20px"}))
     sections.append(html.P("CLV = points the line moved toward your bet between the morning and closing snapshots. "
-                           "Consistently positive CLV is the earliest sign of a real edge, well before win rate settles.",
+                           "Consistently positive CLV is the earliest sign of a real edge, well before win rate settles. "
+                           + ("With the EV rule, compare realized ROI to the average expected EV: if ROI keeps landing well below it, "
+                              "the model's probabilities are overconfident." if rule == "ev" else ""),
                            style={"fontSize": "12.5px", "color": theme["border"], "fontStyle": "italic", "maxWidth": "860px"}))
     calls = bt["calls"]
     figs = []
@@ -900,13 +955,14 @@ def render_moneyball(ci_pct, store):
                                              ("spread", ("home_cover", "away_cover"), ("Bet home", "Bet away"), ["Home covered", "Away covered"])):
         d = calls[(calls["market"] == m) & calls["result"].isin([hi, lo])]
         cm = np.array([[np.sum((d["call"] == s) & (d["result"] == res)) for s in ("HIGH", "NO_BET", "LOW")] for res in (hi, lo)])
-        figs.append(confusion_heatmap(cm, [c_hi, "NO BET", c_lo], ylab, f"{'Totals' if m == 'total' else 'Spreads'} — {ci_pct:.0f}% rule vs. result", x_title="Money Ball call"))
+        figs.append(confusion_heatmap(cm, [c_hi, "NO BET", c_lo], ylab, f"{'Totals' if m == 'total' else 'Spreads'} — {rule_label} vs. result", x_title="Money Ball call"))
     sections.append(html.Div([html.Div(dcc.Graph(figure=f, config={"displayModeBar": False}), style={"flex": 1, "minWidth": "380px", **CARD_STYLE}) for f in figs],
                              style={"display": "flex", "gap": "20px", "flexWrap": "wrap"}))
-    sweep = moneyball_sweep(prep)
+    sweep = moneyball_sweep(prep, rule)
     if not sweep.empty:
-        sections.append(section_header("Finding the right width", "Selectivity vs. win rate across interval levels"))
-        sections.append(html.Div([html.Div(dcc.Graph(figure=sweep_figure(sweep, m, conf)), style={"flex": 1, "minWidth": "380px", **CARD_STYLE})
+        sections.append(section_header("Finding the right setting",
+                                       "Selectivity, win rate and ROI across " + ("EV thresholds" if rule == "ev" else "interval levels")))
+        sections.append(html.Div([html.Div(dcc.Graph(figure=sweep_figure(sweep, m, current, rule)), style={"flex": 1, "minWidth": "380px", **CARD_STYLE})
                                   for m in ("total", "spread")], style={"display": "flex", "gap": "20px", "flexWrap": "wrap"}))
     return html.Div(sections)
 

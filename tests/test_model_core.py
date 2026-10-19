@@ -109,3 +109,56 @@ def test_backtest_profit_and_clv():
     assert t["avg_clv"] == pytest.approx(2.0)    # line moved 220.5 -> 222.5 toward the over
     assert t["breakeven"] == pytest.approx(50.0)
     assert bt["spread"]["n_bets"] == 0
+
+
+def test_ev_choice_math():
+    # Model says 60% over / 40% under on a 220.5 line; over at -110 pays 0.909 per unit.
+    draws = np.sort(np.concatenate([np.full(600, 225.0), np.full(400, 215.0)]))
+    c = core.ev_choice(draws, 220.5, -110, -110)
+    assert c["side"] == "HIGH" and c["p_win"] == pytest.approx(0.6)
+    assert c["ev"] == pytest.approx(0.6 * 100 / 110 - 0.4)          # +14.5 cents per unit
+    assert c["breakeven"] == pytest.approx(110 / 210)
+    b = 100 / 110
+    assert c["kelly"] == pytest.approx(min((b * 0.6 - 0.4) / b * 0.25, core.KELLY_CAP))
+    # A whole-number line with draws landing on it: pushes return the stake, so they don't count as losses.
+    pushy = np.sort(np.concatenate([np.full(500, 221.0), np.full(300, 225.0), np.full(200, 215.0)]))
+    c2 = core.ev_choice(pushy, 221.0, -110, -110)
+    assert c2["side"] == "HIGH" and c2["ev"] == pytest.approx(0.3 * 100 / 110 - 0.2)
+    # A coin flip at -110 is negative EV on both sides.
+    flat = np.sort(np.concatenate([np.full(500, 225.0), np.full(500, 215.0)]))
+    assert core.ev_choice(flat, 220.5, -110, -110)["ev"] < 0
+    assert core.ev_choice(None, 220.5, -110, -110) is None
+
+
+def test_backtest_ev_rule():
+    draws = np.sort(np.concatenate([np.full(600, 225.0), np.full(400, 215.0)]))   # 60% over
+    base = {"_margin_sorted": None, "line_implied_home_margin": np.nan, "actual_margin": 3,
+            "spread_result": None, "best_home_price": np.nan, "best_away_price": np.nan,
+            "close_implied_home_margin": np.nan, "best_under_price": -110, "close_total": 221.5}
+    prep = pd.DataFrame([
+        {**base, "game_id": "g1", "_total_sorted": draws, "line_total": 220.5, "actual_total": 230,
+         "total_result": "over", "best_over_price": -110},
+        {**base, "game_id": "g2", "_total_sorted": draws, "line_total": 220.5, "actual_total": 210,
+         "total_result": "under", "best_over_price": -110},
+        # Same model view but a terrible price: EV = 0.6 * 0.4 - 0.4 < 0, so no bet.
+        {**base, "game_id": "g3", "_total_sorted": draws, "line_total": 220.5, "actual_total": 230,
+         "total_result": "over", "best_over_price": -250},
+    ])
+    bt = core.backtest(prep, rule="ev", min_ev=0.03)
+    t = bt["total"]
+    assert t["n_games"] == 3 and t["n_bets"] == 2 and t["win_rate"] == 50.0
+    assert t["units"] == pytest.approx(100 / 110 - 1)
+    assert t["avg_ev"] == pytest.approx((0.6 * 100 / 110 - 0.4) * 100)
+    assert t["avg_clv"] == pytest.approx(1.0)
+    # A higher bar than the edge on offer means no bets at all.
+    assert core.backtest(prep, rule="ev", min_ev=0.20)["total"]["n_bets"] == 0
+    # The interval rule ignores price and is unaffected by min_ev.
+    assert core.backtest(prep, 0.5, rule="interval")["total"]["n_games"] == 3
+
+
+def test_colab_notebook_is_in_sync_with_the_modules():
+    """model/NBA_Dashboard.ipynb is generated from the .py files; rebuild it after editing them:
+    python model/build_colab.py"""
+    import build_colab
+    expected, _ = build_colab.build(write=False)
+    assert build_colab.OUT.read_text() == expected, "Notebook is stale: run python model/build_colab.py"
