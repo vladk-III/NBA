@@ -212,6 +212,33 @@ def test_merged_results_and_pushes():
     assert out.at["1", "Consensus - Over/Under Total"] == 220.5
 
 
+def test_merged_kalshi_spreads():
+    hist = pd.DataFrame([
+        {"game_id": "1", "season": "2026-27", "home_team_abbreviation": "NYK", "away_team_abbreviation": "BOS",
+         "home_points": 115, "away_points": 110},     # NYK by 5
+        {"game_id": "2", "season": "2026-27", "home_team_abbreviation": "LAL", "away_team_abbreviation": "GSW",
+         "home_points": 100, "away_points": 103},     # GSW by 3
+        {"game_id": "3", "season": "2026-27", "home_team_abbreviation": "MIA", "away_team_abbreviation": "ORL",
+         "home_points": 99, "away_points": 95}])      # no Kalshi spread
+    def line(gid, team, strike, volume, top, label="morning"):
+        row = {c: None for c in kalshi.SPREAD_COLUMNS}
+        row.update({"snapshot_utc": "2026-10-21T15:30:00Z", "snapshot_label": label, "game_id": gid, "team": team,
+                    "line": strike, "last_price": 55, "volume": volume, "is_top_volume": top})
+        return row
+    ks = pd.DataFrame([line("1", "NYK", 4.5, 900, True), line("1", "BOS", 1.5, 50, False),
+                       line("2", "GSW", 3.0, 400, True), line("1", "NYK", 6.5, 10, True, "closing")])
+    out = merge.build_merged(hist, pd.DataFrame(columns=odds.COLUMNS), pd.DataFrame(columns=kalshi.COLUMNS),
+                             {"2026-27"}, ks).set_index("game_id")
+    assert out.at["1", "Kalshi Spread Team"] == "NYK" and out.at["1", "Kalshi Spread Line"] == 4.5
+    assert out.at["1", "Kalshi Spread Covered"] == 1          # NYK won by 5 > 4.5
+    assert np.isnan(out.at["2", "Kalshi Spread Covered"])     # GSW won by exactly 3: push
+    assert np.isnan(out.at["3", "Kalshi Spread Covered"])     # no market
+    assert out.at["1", "Close Kalshi Spread Line"] == 6.5 and out.at["1", "Close Kalshi Spread Covered"] == 0
+    # Without a spreads file the table is unchanged.
+    assert "Kalshi Spread Team" not in merge.build_merged(hist, pd.DataFrame(columns=odds.COLUMNS),
+                                                          pd.DataFrame(columns=kalshi.COLUMNS), {"2026-27"})
+
+
 def test_refuses_to_rebuild_legacy_season(tmp_path, monkeypatch):
     import collect_nba
     hist = tmp_path / "hist.csv"

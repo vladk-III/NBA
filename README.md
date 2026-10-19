@@ -73,7 +73,7 @@ Append-only. Every open line in Kalshi's NBA game-total markets (`KXNBATOTAL`, "
 The same for Kalshi's spread markets (`KXNBASPREAD`, "TEAM wins by over X points"), with a `team` column naming whose margin each line is.
 
 ### `nba_merged_data.csv`
-The model-ready table for the current season: the historical stats row, the morning lines with the original column names (`DraftKings - Over/Under Total`, …), the same for closing lines prefixed with `Close `, a `Consensus` median across all books, Kalshi's top-volume total line, and the results `Total Score`, `Over Hit (...)` and `Home Covered (...)` (blank on a push or before the game is played).
+The model-ready table for the current season: the historical stats row, the morning lines with the original column names (`DraftKings - Over/Under Total`, …), the same for closing lines prefixed with `Close `, a `Consensus` median across all books, Kalshi's top-volume total line, Kalshi's top-volume spread line (`Kalshi Spread Team` wins by more than `Kalshi Spread Line`; plus `Kalshi Spread Covered` once the game is final), and the results `Total Score`, `Over Hit (...)` and `Home Covered (...)` (blank on a push or before the game is played).
 
 ## Modeling dashboard (`model/`)
 
