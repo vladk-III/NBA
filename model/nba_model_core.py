@@ -370,10 +370,15 @@ def fit_bps(df: pd.DataFrame, mu_cols: list[str], sd_cols: list[str], actual_col
         for i, c in enumerate(sd_cols)])
     obs_var0 = max(0.5 * float(np.var(y - MU.mean(axis=1))), 1e-3)
     flt = BPSFilter(len(mu_cols), n_particles, delta, beta, obs_var0, seed)
+    path, ess_path = [], []   # weights and particle ESS after each game, for the diagnostics tab
     for t in range(len(y)):
         flt.update(MU[t], SD[t], y[t])
+        path.append(flt.theta_mean().tolist())
+        ess_path.append(flt.ess)
     return {"state": flt.get_state(), "n_obs": int(len(y)), "theta_mean": flt.theta_mean().tolist(),
-            "vol_sd": flt.vol_mean(), "ess": flt.ess}
+            "vol_sd": flt.vol_mean(), "ess": flt.ess,
+            "history": {"game_date": d["game_date"].astype(str).tolist(), "game_id": d["game_id"].astype(str).tolist(),
+                        "theta": path, "ess": ess_path}}
 
 
 # =============================================================================
