@@ -242,17 +242,24 @@ def devig_pair(price_a, price_b):
     return pa / (pa + pb)
 
 
-KALSHI_SIGMA = 18.0      # spread of NBA totals around the line; turns P(over X) into an implied median
-KALSHI_MAX_SPREAD = 15   # cents; a wider bid/ask is too stale to price from, so fall back to the last trade
+KALSHI_SIGMA = 18.0         # spread of NBA totals around the line; turns P(over X) into an implied median
+KALSHI_SPREAD_SIGMA = 12.5  # the same for the home margin around the spread
+KALSHI_MAX_SPREAD = 15      # cents; a wider bid/ask is too stale to price from, so fall back to the last trade
 
 
-def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
-    """One row per game_id: the game total Kalshi's KXNBATOTAL markets imply.
+def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning", market: str = "total") -> pd.DataFrame:
+    """One row per game_id: the number Kalshi's markets imply.
 
-    Each "over X points" line with price p (bid/ask mid, else last trade, in cents) implies a median
-    total of X + sigma * z(p). Lines are averaged with weights p(1 - p) * (volume + 1), so liquid
-    lines near 50/50 count most and lines priced at 2 or 98 cents barely count."""
-    cols = ["game_id", "kalshi_total", "kalshi_volume", "kalshi_n_lines"]
+    market="total" (KXNBATOTAL, "over X points") gives kalshi_total. market="spread" (KXNBASPREAD,
+    "TEAM wins by over X points", with a team column) gives kalshi_home_margin.
+
+    Each line X with price p (bid/ask mid, else last trade, in cents) implies a median of X + sigma * z(p),
+    for the total or for that team's margin (negated for the away team). Lines are averaged with weights
+    p(1 - p) * (volume + 1), so liquid lines near 50/50 count most and lines at 2 or 98 cents barely count."""
+    spread = market == "spread"
+    name, sigma = ("kalshi_home_margin", KALSHI_SPREAD_SIGMA) if spread else ("kalshi_total", KALSHI_SIGMA)
+    prefix = "kalshi_spread" if spread else "kalshi"
+    cols = ["game_id", name, f"{prefix}_volume", f"{prefix}_n_lines"]
     if kalshi is None or kalshi.empty:
         return pd.DataFrame(columns=cols)
     k = kalshi[(kalshi["snapshot_label"] == label) & kalshi["game_id"].notna()].copy()
@@ -265,13 +272,19 @@ def kalshi_lines(kalshi: pd.DataFrame, label: str = "morning") -> pd.DataFrame:
     quoted = (k["yes_bid"] > 0) & (k["yes_ask"] < 100) & (k["yes_ask"] - k["yes_bid"]).between(0, KALSHI_MAX_SPREAD)
     k["p"] = np.where(quoted, (k["yes_bid"] + k["yes_ask"]) / 2, k["last_price"]) / 100.0
     k = k[k["line"].notna() & k["p"].between(0.02, 0.98)]
+    if spread:
+        home = k["team"] == k["home_team_abbreviation"]
+        away = k["team"] == k["away_team_abbreviation"]
+        k = k[home | away].assign(side=np.where(home[home | away], 1.0, -1.0))
     if k.empty:
         return pd.DataFrame(columns=cols)
     z = NormalDist().inv_cdf
-    k["implied"] = k["line"] + KALSHI_SIGMA * k["p"].map(z)
+    k["implied"] = k["line"] + sigma * k["p"].map(z)
+    if spread:
+        k["implied"] *= k["side"]
     k["w"] = k["p"] * (1 - k["p"]) * (k["volume"].fillna(0).clip(lower=0) + 1)
-    rows = [{"game_id": gid, "kalshi_total": float(np.average(g["implied"], weights=g["w"])),
-             "kalshi_volume": float(g["volume"].fillna(0).sum()), "kalshi_n_lines": len(g)}
+    rows = [{"game_id": gid, name: float(np.average(g["implied"], weights=g["w"])),
+             f"{prefix}_volume": float(g["volume"].fillna(0).sum()), f"{prefix}_n_lines": len(g)}
             for gid, g in k.groupby("game_id")]
     return pd.DataFrame(rows, columns=cols)
 
@@ -807,26 +820,30 @@ def predict_b(idata, df, index, rng):
 # =============================================================================
 # MODEL C — market-anchored
 # =============================================================================
-KALSHI_GAP_CAP = 6.0   # points; a bigger gap is a thin or stale Kalshi market, not information
+KALSHI_GAP_CAP = {"total": 6.0, "margin": 4.0}   # points; a bigger gap is a thin or stale market, not information
+KALSHI_COLS = {"total": ("kalshi_total", "line_total"), "margin": ("kalshi_home_margin", "line_implied_home_margin")}
 
 
-def kalshi_gap(df: pd.DataFrame) -> np.ndarray:
-    """Kalshi's implied total minus the books' consensus line, capped; 0 where Kalshi has no market."""
-    if "kalshi_total" not in df:
+def kalshi_gap(df: pd.DataFrame, market: str = "total") -> np.ndarray:
+    """Kalshi's implied total (or home margin) minus the books' consensus, capped; 0 where Kalshi has no market."""
+    kcol, lcol = KALSHI_COLS[market]
+    if kcol not in df:
         return np.zeros(len(df))
-    gap = df["kalshi_total"].to_numpy(float) - df["line_total"].to_numpy(float)
-    return np.nan_to_num(np.clip(gap, -KALSHI_GAP_CAP, KALSHI_GAP_CAP), nan=0.0)
+    gap = df[kcol].to_numpy(float) - df[lcol].to_numpy(float)
+    cap = KALSHI_GAP_CAP[market]
+    return np.nan_to_num(np.clip(gap, -cap, cap), nan=0.0)
 
 
 def model_c(train: pd.DataFrame, tot_std: Standardizer, mar_std: Standardizer):
-    """train needs line_total and line_implied_home_margin; kalshi_total is optional. Works with zero
-    rows (priors only). Kalshi only lists game totals, so it enters the total, not the margin."""
+    """train needs line_total and line_implied_home_margin; kalshi_total and kalshi_home_margin are
+    optional. Works with zero rows (priors only)."""
     Zt, Zm = tot_std.transform(train), mar_std.transform(train)
     line_t = train["line_total"].to_numpy(float)
     line_m = train["line_implied_home_margin"].to_numpy(float)
     gap_t = train["exp_total"].to_numpy(float) - line_t
     gap_m = train["exp_margin"].to_numpy(float) - line_m
-    gap_k = kalshi_gap(train)
+    gap_k = kalshi_gap(train, "total")
+    gap_km = kalshi_gap(train, "margin")
     with pm.Model() as m:
         d0 = pm.Normal("d0", 0.0, 1.5)
         d1 = pm.Normal("d1", 0.0, 0.2)
@@ -835,13 +852,14 @@ def model_c(train: pd.DataFrame, tot_std: Standardizer, mar_std: Standardizer):
         e0 = pm.Normal("e0", 0.0, 1.0)
         e1 = pm.Normal("e1", 0.0, 0.2)
         g_m = pm.Normal("g_m", 0.0, 0.75, shape=Zm.shape[1])
+        k2 = pm.Normal("k2", 0.0, 0.3)   # the same for Kalshi's spread vs the books' spread
         s_t = pm.Gamma("sigma_t", mu=18.0, sigma=3.0)
         s_m = pm.Gamma("sigma_m", mu=12.5, sigma=2.5)
         nu = pm.Deterministic("nu", 2.0 + pm.Gamma("nu_raw", 4.0, 0.2))
         if len(train):
             pm.StudentT("total", nu=nu, mu=line_t + d0 + d1 * gap_t + k1 * gap_k + pt.dot(Zt, g_t), sigma=s_t,
                         observed=train["total_points"].to_numpy(float))
-            pm.StudentT("margin", nu=nu, mu=line_m + e0 + e1 * gap_m + pt.dot(Zm, g_m), sigma=s_m,
+            pm.StudentT("margin", nu=nu, mu=line_m + e0 + e1 * gap_m + k2 * gap_km + pt.dot(Zm, g_m), sigma=s_m,
                         observed=train["margin"].to_numpy(float))
     return m
 
@@ -853,11 +871,14 @@ def predict_c(idata, df, tot_std, mar_std, rng):
     line_m = df["line_implied_home_margin"].to_numpy(float)
     gap_t = df["exp_total"].to_numpy(float) - line_t
     gap_m = df["exp_margin"].to_numpy(float) - line_m
-    # A state saved before Kalshi was added has no k1: treat it as zero weight.
-    k1 = _post(idata, "k1") if "k1" in idata.posterior else np.zeros_like(_post(idata, "d0"))
+    # A state saved before the Kalshi inputs were added lacks k1/k2: treat them as zero weight.
+    zero = np.zeros_like(_post(idata, "d0"))
+    k1 = _post(idata, "k1") if "k1" in idata.posterior else zero
+    k2 = _post(idata, "k2") if "k2" in idata.posterior else zero
     mu_t = (line_t + _post(idata, "d0")[:, None] + _post(idata, "d1")[:, None] * gap_t
-            + k1[:, None] * kalshi_gap(df) + _post(idata, "g_t") @ Zt.T)
-    mu_m = line_m + _post(idata, "e0")[:, None] + _post(idata, "e1")[:, None] * gap_m + _post(idata, "g_m") @ Zm.T
+            + k1[:, None] * kalshi_gap(df, "total") + _post(idata, "g_t") @ Zt.T)
+    mu_m = (line_m + _post(idata, "e0")[:, None] + _post(idata, "e1")[:, None] * gap_m
+            + k2[:, None] * kalshi_gap(df, "margin") + _post(idata, "g_m") @ Zm.T)
     nu = _post(idata, "nu")
     tot = mu_t + _post(idata, "sigma_t")[:, None] * _student_t(rng, nu, mu_t.shape)
     mar = mu_m + _post(idata, "sigma_m")[:, None] * _student_t(rng, nu, mu_m.shape)
@@ -1047,22 +1068,27 @@ def load_data(fresh: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     return hist, _load_csv("odds_snapshots.csv", age)
 
 
-def load_kalshi(fresh: bool = True) -> pd.DataFrame:
-    return _load_csv("kalshi_snapshots.csv", 0 if fresh else CSV_CACHE_TTL_SEC)
+def load_kalshi(fresh: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(totals, spreads) Kalshi snapshots."""
+    age = 0 if fresh else CSV_CACHE_TTL_SEC
+    return _load_csv("kalshi_snapshots.csv", age), _load_csv("kalshi_spread_snapshots.csv", age)
 
 
-def attach_lines(feats: pd.DataFrame, odds: pd.DataFrame, kalshi: pd.DataFrame | None = None) -> pd.DataFrame:
+def _morning_first(lines_fn, snaps) -> pd.DataFrame:
+    morning, closing = lines_fn(snaps, "morning"), lines_fn(snaps, "closing")
+    return pd.concat([morning, closing[~closing["game_id"].isin(morning["game_id"])]], ignore_index=True)
+
+
+def attach_lines(feats: pd.DataFrame, odds: pd.DataFrame,
+                 kalshi: tuple[pd.DataFrame, pd.DataFrame] | None = None) -> pd.DataFrame:
     """Morning consensus lines and prices (closing snapshot as fallback for games with no morning one),
-    plus the game total implied by Kalshi's morning markets (an input to Model C)."""
-    morning = core.market_lines(odds, "morning")
-    closing = core.market_lines(odds, "closing")
-    lines = pd.concat([morning, closing[~closing["game_id"].isin(morning["game_id"])]], ignore_index=True)
-    out = feats.merge(lines, on="game_id", how="left")
+    plus the total and home margin implied by Kalshi's markets (inputs to Model C)."""
+    out = feats.merge(_morning_first(core.market_lines, odds), on="game_id", how="left")
     out["line_implied_home_margin"] = -out["line_spread_home"]
-    k_morning = core.kalshi_lines(kalshi, "morning")
-    k_closing = core.kalshi_lines(kalshi, "closing")
-    k = pd.concat([k_morning, k_closing[~k_closing["game_id"].isin(k_morning["game_id"])]], ignore_index=True)
-    return out.merge(k, on="game_id", how="left")
+    totals, spreads = kalshi if kalshi is not None else (None, None)
+    out = out.merge(_morning_first(core.kalshi_lines, totals), on="game_id", how="left")
+    spread_lines = lambda snaps, label: core.kalshi_lines(snaps, label, "spread")  # noqa: E731
+    return out.merge(_morning_first(spread_lines, spreads), on="game_id", how="left")
 
 
 def format_spread_val(val, home, away):
@@ -1190,7 +1216,7 @@ HISTORY_COLS = (["game_id", "game_date", "season", "home_team", "away_team"]
                    "line_total", "line_spread_home", "line_implied_home_margin",
                    "over_price", "under_price", "best_over_price", "best_under_price",
                    "home_price", "away_price", "best_home_price", "best_away_price", "kalshi_total",
-                   "edge_total", "edge_margin", "edge_total_z", "edge_margin_z", "total_tier", "spread_tier",
+                   "kalshi_home_margin", "edge_total", "edge_margin", "edge_total_z", "edge_margin_z", "total_tier", "spread_tier",
                    "model_prob_over", "model_prob_home_cover", "total_draws_json", "margin_draws_json", "predicted_at"])
 
 
@@ -1235,7 +1261,7 @@ def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, de
     }
     out = slate[["game_id", "game_date", "season", "home_team", "away_team", "line_total", "line_spread_home",
                  "line_implied_home_margin", "over_price", "under_price", "best_over_price", "best_under_price",
-                 "home_price", "away_price", "best_home_price", "best_away_price", "kalshi_total"]].copy()
+                 "home_price", "away_price", "best_home_price", "best_away_price", "kalshi_total", "kalshi_home_margin"]].copy()
     for a, (tot, mar) in draws.items():
         out[f"{a}_total_mean"], out[f"{a}_total_std"] = tot.mean(0), tot.std(0)
         out[f"{a}_margin_mean"], out[f"{a}_margin_std"] = mar.mean(0), mar.std(0)

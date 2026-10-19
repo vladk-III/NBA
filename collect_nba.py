@@ -23,8 +23,8 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 from nba_pipeline import espn, features, kalshi, merge, odds
-from nba_pipeline.config import (EASTERN, GAMES_FILE, HISTORICAL_FILE, KALSHI_FILE, MERGED_FILE,
-                                 ODDS_FILE, TEAM_LOGS_FILE, season_label)
+from nba_pipeline.config import (EASTERN, GAMES_FILE, HISTORICAL_FILE, KALSHI_FILE, KALSHI_SPREAD_FILE,
+                                 MERGED_FILE, ODDS_FILE, TEAM_LOGS_FILE, season_label)
 
 LOG = logging.getLogger("nba_collector")
 
@@ -142,7 +142,8 @@ def already_snapped(path, columns, label: str, game_date: str) -> bool:
 
 
 def take_snapshots(label: str, games: pd.DataFrame, today: str, now: datetime, force: bool) -> dict:
-    result = {"odds_rows": 0, "kalshi_rows": 0, "odds_error": None, "kalshi_error": None, "credits_left": None}
+    result = {"odds_rows": 0, "kalshi_rows": 0, "kalshi_spread_rows": 0, "odds_error": None, "kalshi_error": None,
+              "credits_left": None}
     upcoming = games[(games["game_date"] == today) & (games["game_status"] == 1)]
     upcoming = upcoming[pd.to_datetime(upcoming["tipoff_utc"], utc=True) > pd.Timestamp(now)]
     result["upcoming"] = len(upcoming)
@@ -163,16 +164,21 @@ def take_snapshots(label: str, games: pd.DataFrame, today: str, now: datetime, f
             LOG.error("Odds snapshot failed: %s", e)
             result["odds_error"] = str(e)
 
-    if not force and already_snapped(KALSHI_FILE, kalshi.COLUMNS, label, today):
-        LOG.info("Kalshi '%s' snapshot for %s already taken; skipping", label, today)
-    else:
+    errors = []
+    for series, path, columns, key in ((kalshi.SERIES, KALSHI_FILE, kalshi.COLUMNS, "kalshi_rows"),
+                                       (kalshi.SPREAD_SERIES, KALSHI_SPREAD_FILE, kalshi.SPREAD_COLUMNS,
+                                        "kalshi_spread_rows")):
+        if not force and already_snapped(path, columns, label, today):
+            LOG.info("Kalshi %s '%s' snapshot for %s already taken; skipping", series, label, today)
+            continue
         try:
-            df = kalshi.fetch_snapshot(label, today, games, now)
-            append_csv(df, KALSHI_FILE, kalshi.COLUMNS)
-            result["kalshi_rows"] = len(df)
+            df = kalshi.fetch_snapshot(label, today, games, now, series)
+            append_csv(df, path, columns)
+            result[key] = len(df)
         except Exception as e:
-            LOG.error("Kalshi snapshot failed: %s", e)
-            result["kalshi_error"] = str(e)
+            LOG.error("Kalshi %s snapshot failed: %s", series, e)
+            errors.append(f"{series}: {e}")
+    result["kalshi_error"] = "; ".join(errors) or None
     return result
 
 
@@ -263,6 +269,7 @@ PROBE_URLS = {
     "ESPN scoreboard": f"{espn.SCOREBOARD_URL}?dates=20260211",
     "ESPN box score": f"{espn.SUMMARY_URL}?event=401809243",
     "Kalshi markets": f"{kalshi.API}/markets?series_ticker={kalshi.SERIES}&limit=1",
+    "Kalshi spread markets": f"{kalshi.API}/markets?series_ticker={kalshi.SPREAD_SERIES}&limit=1",
     "NBA.com CDN schedule (not used; blocked from GitHub)":
         "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
 }
@@ -347,7 +354,8 @@ def main() -> int:
 
     todays = int((games["game_date"] == today).sum())
     stats = (f"{todays} games today; {new_games} new box scores; "
-             f"odds rows {snap.get('odds_rows', 0)}; kalshi rows {snap.get('kalshi_rows', 0)}; "
+             f"odds rows {snap.get('odds_rows', 0)}; kalshi rows {snap.get('kalshi_rows', 0)} totals, "
+             f"{snap.get('kalshi_spread_rows', 0)} spreads; "
              f"Odds API credits left {snap.get('credits_left') or 'n/a'}; merged rows {merged_rows}")
     LOG.info(stats)
     set_output(collected="true", mode=mode, date=today, season=season, stats=stats)

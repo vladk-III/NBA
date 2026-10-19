@@ -139,6 +139,26 @@ def test_kalshi_snapshot(monkeypatch):
     assert top["game_id"] == "0022600002"
 
 
+def test_kalshi_spread_snapshot(monkeypatch):
+    ev = "KXNBASPREAD-26OCT21BOSNYK"
+    markets = {"markets": [
+        {"ticker": f"{ev}-BOS5", "event_ticker": ev, "floor_strike": 4.5, "yes_bid": 50, "yes_ask": 52, "volume": 800},
+        {"ticker": f"{ev}-NYK2", "event_ticker": ev, "floor_strike": 1.5, "last_price": 30, "volume": 100},
+        {"ticker": f"{ev}-LAL5", "event_ticker": ev, "floor_strike": 4.5, "volume": 5}],   # not in the game: dropped
+        "cursor": ""}
+    seen = []
+    def fake(url, params=None, **k):
+        seen.append((params or {}).get("series_ticker"))
+        return ({"trades": [], "cursor": ""} if url.endswith("/trades") else markets), None
+    monkeypatch.setattr(kalshi, "get_json", fake)
+    now = datetime(2026, 10, 21, 15, 30, tzinfo=timezone.utc)
+    df = kalshi.fetch_snapshot("closing", "2026-10-21", _games(), now, kalshi.SPREAD_SERIES)
+    assert kalshi.SPREAD_SERIES in seen and list(df.columns) == kalshi.SPREAD_COLUMNS
+    assert df.set_index("ticker")["team"].to_dict() == {f"{ev}-BOS5": "BOS", f"{ev}-NYK2": "NYK"}
+    assert df.set_index("team").loc["BOS", "is_top_volume"] == True  # noqa: E712
+    assert kalshi._team("KXNBASPREAD-26OCT16PORGSW-GSW27") == "GSW"
+
+
 def test_odds_snapshot(monkeypatch):
     monkeypatch.setenv("ODDS_API_KEY", "test")
     events = [{"id": "ev1", "commence_time": "2026-10-21T23:30:00Z",

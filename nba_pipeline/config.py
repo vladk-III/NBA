@@ -11,6 +11,7 @@ TEAM_LOGS_FILE = DATA_DIR / "team_game_logs.csv"
 HISTORICAL_FILE = DATA_DIR / "historical_nba_cumulative_stats.csv"
 ODDS_FILE = DATA_DIR / "odds_snapshots.csv"
 KALSHI_FILE = DATA_DIR / "kalshi_snapshots.csv"
+KALSHI_SPREAD_FILE = DATA_DIR / "kalshi_spread_snapshots.csv"
 MERGED_FILE = DATA_DIR / "nba_merged_data.csv"
 
 # Game ID digit 3 encodes the game type: 1 preseason, 2 regular season, 3 All-Star,
