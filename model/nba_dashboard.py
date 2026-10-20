@@ -400,7 +400,7 @@ def _clean(value, default, lo, hi, cast=float):
 # PIPELINES
 # =============================================================================
 def run_training_pipeline(set_progress):
-    set_progress("Loading historical stats and odds...")
+    set_progress(f"Loading historical stats and odds... ({models.library_versions()})")
     hist, odds = load_data(fresh=True)
     final = hist["home_points"].notna()
     prior = core.league_prior(hist[final])
@@ -437,7 +437,7 @@ def run_training_pipeline(set_progress):
         pickle.dump({"prior": prior, "tot_std": tot_std.get_state(), "mar_std": mar_std.get_state(),
                      "center": center, "index": index, "n_train": len(train), "n_train_c": len(train_c),
                      "trained_at": pd.Timestamp.now(tz="UTC").isoformat()}, f)
-    set_progress(f"Training complete: {len(train)} games (A, B), {len(train_c)} with lines (C).")
+    set_progress(f"Training complete: {len(train)} games (A, B), {len(train_c)} with lines (C). {models.library_versions()}")
     return {"ok": True}
 
 
@@ -889,7 +889,7 @@ def _background(fn, label):
             return fn(lambda msg: set_progress([msg]), *args)
         except Exception as e:
             LOG.exception("%s failed", label)
-            set_progress([f"⚠ {label} failed: {e}"])
+            set_progress([f"⚠ {label} failed: {e} ({models.library_versions()})"])
             return {"ok": False, "error": str(e)}
     return run
 
