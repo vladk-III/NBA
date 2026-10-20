@@ -18,6 +18,7 @@ code serves any slate of games without rebuilding the PyMC models.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 
 import numpy as np
@@ -265,3 +266,36 @@ def sample(model, draws: int, tune: int, chains: int, seed: int, sampler: str = 
         except Exception as e:  # fall back rather than fail a daily run
             LOG.warning("%s sampler failed (%s); falling back to PyMC NUTS.", sampler, e)
     return pm.sample(cores=1, **kw)
+
+
+def _netcdf_attrs(attrs: dict) -> dict:
+    """netCDF stores only strings, numbers and flat arrays as attributes; anything else becomes JSON text."""
+    def plain(v):
+        return isinstance(v, (str, bytes, int, float, np.number, np.ndarray)) and not isinstance(v, (bool, np.bool_))
+    out = {}
+    for k, v in attrs.items():
+        if plain(v) or (isinstance(v, (list, tuple)) and all(plain(x) for x in v)):
+            out[k] = v
+        else:
+            out[k] = json.dumps(v, default=str)
+    return out
+
+
+def save_idata(idata, path: str) -> None:
+    """to_netcdf, after cleaning attributes some sampler versions fill with dicts (nutpie's settings),
+    which netCDF rejects. Works with ArviZ 0.x InferenceData and 1.x DataTree."""
+    if hasattr(idata, "subtree"):   # ArviZ 1.x
+        nodes = list(idata.subtree)
+        datasets = [n.dataset for n in nodes]
+    else:                           # ArviZ 0.x
+        nodes, datasets = [], [getattr(idata, g) for g in idata.groups()]
+    for node in nodes:
+        node.attrs = _netcdf_attrs(node.attrs)
+    for ds in datasets:
+        ds.attrs = _netcdf_attrs(ds.attrs)
+        for var in ds.variables.values():
+            var.attrs = _netcdf_attrs(var.attrs)
+    if nodes:   # DataTree datasets are views; write the cleaned copies back
+        for node, ds in zip(nodes, datasets):
+            node.dataset = ds
+    idata.to_netcdf(path)

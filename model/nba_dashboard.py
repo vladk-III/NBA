@@ -424,14 +424,14 @@ def run_training_pipeline(set_progress):
 
     set_progress(f"Training Model A (pace × efficiency) on {len(train)} games with {sampler} NUTS...")
     idata_a = models.sample(models.model_a(train, tot_std, mar_std, center), DRAWS, TUNE, CHAINS, TRAIN_SEED, NUTS_SAMPLER)
-    idata_a.to_netcdf(str(STATE_DIR / "model_a.nc"))
+    models.save_idata(idata_a, str(STATE_DIR / "model_a.nc"))
     set_progress(f"Training Model B (team strength, {len(index['keys'])} team-seasons)...")
     idata_b = models.sample(models.model_b(train, index), DRAWS, TUNE, CHAINS, TRAIN_SEED + 1, NUTS_SAMPLER)
-    idata_b.to_netcdf(str(STATE_DIR / "model_b.nc"))
+    models.save_idata(idata_b, str(STATE_DIR / "model_b.nc"))
     set_progress(f"Training Model C (market-anchored) on {len(train_c)} games with lines"
                  + (" — priors only until graded lines exist" if train_c.empty else "") + "...")
     idata_c = models.sample(models.model_c(train_c, tot_std, mar_std), DRAWS, TUNE, CHAINS, TRAIN_SEED + 2, NUTS_SAMPLER)
-    idata_c.to_netcdf(str(STATE_DIR / "model_c.nc"))
+    models.save_idata(idata_c, str(STATE_DIR / "model_c.nc"))
 
     with open(BUNDLE_PATH, "wb") as f:
         pickle.dump({"prior": prior, "tot_std": tot_std.get_state(), "mar_std": mar_std.get_state(),
