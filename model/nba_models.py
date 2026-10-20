@@ -287,8 +287,10 @@ def save_idata(idata, path: str) -> None:
     if hasattr(idata, "subtree"):   # ArviZ 1.x
         nodes = list(idata.subtree)
         datasets = [n.dataset for n in nodes]
-    else:                           # ArviZ 0.x
+    else:                           # ArviZ 0.x: nutpie also puts its settings in the top-level attrs
         nodes, datasets = [], [getattr(idata, g) for g in idata.groups()]
+        if getattr(idata, "attrs", None):
+            idata.attrs = _netcdf_attrs(idata.attrs)
     for node in nodes:
         node.attrs = _netcdf_attrs(node.attrs)
     for ds in datasets:
