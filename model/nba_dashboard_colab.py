@@ -895,6 +895,18 @@ def predict_c(idata, df, tot_std, mar_std, rng):
 # =============================================================================
 # SAMPLING
 # =============================================================================
+def library_versions() -> str:
+    """'pymc 5.28.5 · arviz 0.23.4 · nutpie 0.16.11 · xarray 2026.9.0', for status lines and bug reports."""
+    import importlib
+    out = []
+    for name in ("pymc", "arviz", "nutpie", "xarray"):
+        try:
+            out.append(f"{name} {importlib.import_module(name).__version__}")
+        except Exception:
+            out.append(f"{name} —")
+    return " · ".join(out)
+
+
 def resolve_sampler(choice: str = "auto") -> str:
     if choice == "auto":
         return "nutpie" if importlib.util.find_spec("nutpie") is not None else "pymc"
@@ -933,15 +945,24 @@ def _name(n):
     return n if isinstance(n, str) else str(n[-1] if isinstance(n, tuple) and n else n)
 
 
-def _clean_dataset(ds):
-    ds = ds.copy()
-    renames = {k: _name(k) for k in list(ds.variables) + list(ds.dims) if not isinstance(k, str)}
-    if renames:
-        ds = ds.rename(renames)
-    ds.attrs = _netcdf_attrs(ds.attrs)
-    for var in ds.variables.values():
-        var.attrs = _netcdf_attrs(var.attrs)
-    return ds
+def _clean_dataset(ds, group: str):
+    """A fresh Dataset with one plain-named copy of each variable. Some library combinations hand back
+    a group whose names carry a group prefix, ('posterior', 'a_m'), next to the plain dims, or that
+    holds other groups' variables too; prefixed names from another group are dropped."""
+    import xarray as xr
+
+    def keep(name):
+        return not (isinstance(name, tuple) and len(name) > 1 and name[0] != group)
+
+    coords, data_vars = {}, {}
+    for name, var in ds.coords.items():
+        if keep(name) and _name(name) not in coords:
+            coords[_name(name)] = (tuple(_name(d) for d in var.dims), np.asarray(var.values), _netcdf_attrs(var.attrs))
+    for name, var in ds.data_vars.items():
+        n = _name(name)
+        if keep(name) and n not in coords and n not in data_vars:
+            data_vars[n] = (tuple(_name(d) for d in var.dims), np.asarray(var.values), _netcdf_attrs(var.attrs))
+    return xr.Dataset(data_vars, coords=coords, attrs=_netcdf_attrs(ds.attrs))
 
 
 def save_idata(idata, path: str) -> None:
@@ -958,7 +979,7 @@ def save_idata(idata, path: str) -> None:
     if os.path.exists(path):
         os.remove(path)
     for i, (g, ds) in enumerate(groups.items()):
-        _clean_dataset(ds).to_netcdf(path, group=g, mode="w" if i == 0 else "a")
+        _clean_dataset(ds, g).to_netcdf(path, group=g, mode="w" if i == 0 else "a")
 
 
 # =============================================================================
@@ -1287,7 +1308,7 @@ def _clean(value, default, lo, hi, cast=float):
 # PIPELINES
 # =============================================================================
 def run_training_pipeline(set_progress):
-    set_progress("Loading historical stats and odds...")
+    set_progress(f"Loading historical stats and odds... ({models.library_versions()})")
     hist, odds = load_data(fresh=True)
     final = hist["home_points"].notna()
     prior = core.league_prior(hist[final])
@@ -1324,7 +1345,7 @@ def run_training_pipeline(set_progress):
         pickle.dump({"prior": prior, "tot_std": tot_std.get_state(), "mar_std": mar_std.get_state(),
                      "center": center, "index": index, "n_train": len(train), "n_train_c": len(train_c),
                      "trained_at": pd.Timestamp.now(tz="UTC").isoformat()}, f)
-    set_progress(f"Training complete: {len(train)} games (A, B), {len(train_c)} with lines (C).")
+    set_progress(f"Training complete: {len(train)} games (A, B), {len(train_c)} with lines (C). {models.library_versions()}")
     return {"ok": True}
 
 
@@ -1776,7 +1797,7 @@ def _background(fn, label):
             return fn(lambda msg: set_progress([msg]), *args)
         except Exception as e:
             LOG.exception("%s failed", label)
-            set_progress([f"⚠ {label} failed: {e}"])
+            set_progress([f"⚠ {label} failed: {e} ({models.library_versions()})"])
             return {"ok": False, "error": str(e)}
     return run
 
