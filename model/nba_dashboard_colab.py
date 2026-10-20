@@ -663,6 +663,7 @@ code serves any slate of games without rebuilding the PyMC models.
 import importlib.util
 import json
 import logging
+import os
 
 import numpy as np
 import pandas as pd
@@ -924,26 +925,40 @@ def _netcdf_attrs(attrs: dict) -> dict:
     return out
 
 
+SAVED_GROUPS = ("posterior", "sample_stats", "observed_data", "constant_data")
+
+
+def _name(n):
+    """netCDF names must be strings; some library combinations hand back ('posterior', 'a_m')."""
+    return n if isinstance(n, str) else str(n[-1] if isinstance(n, tuple) and n else n)
+
+
+def _clean_dataset(ds):
+    ds = ds.copy()
+    renames = {k: _name(k) for k in list(ds.variables) + list(ds.dims) if not isinstance(k, str)}
+    if renames:
+        ds = ds.rename(renames)
+    ds.attrs = _netcdf_attrs(ds.attrs)
+    for var in ds.variables.values():
+        var.attrs = _netcdf_attrs(var.attrs)
+    return ds
+
+
 def save_idata(idata, path: str) -> None:
-    """to_netcdf, after cleaning attributes some sampler versions fill with dicts (nutpie's settings),
-    which netCDF rejects. Works with ArviZ 0.x InferenceData and 1.x DataTree."""
-    if hasattr(idata, "subtree"):   # ArviZ 1.x
-        nodes = list(idata.subtree)
-        datasets = [n.dataset for n in nodes]
-    else:                           # ArviZ 0.x: nutpie also puts its settings in the top-level attrs
-        nodes, datasets = [], [getattr(idata, g) for g in idata.groups()]
-        if getattr(idata, "attrs", None):
-            idata.attrs = _netcdf_attrs(idata.attrs)
-    for node in nodes:
-        node.attrs = _netcdf_attrs(node.attrs)
-    for ds in datasets:
-        ds.attrs = _netcdf_attrs(ds.attrs)
-        for var in ds.variables.values():
-            var.attrs = _netcdf_attrs(var.attrs)
-    if nodes:   # DataTree datasets are views; write the cleaned copies back
-        for node, ds in zip(nodes, datasets):
-            node.dataset = ds
-    idata.to_netcdf(path)
+    """Write the groups the dashboard reads, one netCDF group each, with plain string names and
+    attributes. Writing the groups directly (rather than through ArviZ) sidesteps what some
+    ArviZ / nutpie / xarray version combinations put in the trace: dict attributes such as
+    nutpie's settings, and tuple variable names. Readable by az.from_netcdf in ArviZ 0.x and 1.x."""
+    if hasattr(idata, "children"):   # ArviZ 1.x DataTree
+        groups = {g: idata[g].to_dataset() for g in SAVED_GROUPS if g in idata.children}
+    else:                            # ArviZ 0.x InferenceData
+        groups = {g: getattr(idata, g) for g in SAVED_GROUPS if g in idata.groups()}
+    if "posterior" not in groups:
+        raise ValueError("The sampler returned no posterior to save.")
+    if os.path.exists(path):
+        os.remove(path)
+    for i, (g, ds) in enumerate(groups.items()):
+        _clean_dataset(ds).to_netcdf(path, group=g, mode="w" if i == 0 else "a")
 
 
 # =============================================================================
