@@ -115,6 +115,11 @@ PREDICTIONS_HISTORY_PATH = DRIVE_BASE / "predictions_history.csv"
 BUNDLE_PATH = STATE_DIR / "model_bundle.pkl"
 BPS_BUNDLE_PATH = STATE_DIR / "bps_bundle.pkl"
 
+
+def model_path(key: str) -> Path:
+    """Saved posterior for model a, b or c."""
+    return STATE_DIR / f"model_{key}.pkl"
+
 # =============================================================================
 # THEME & UI STYLES (dark scoreboard: black slate strip, charcoal panels, lime + violet accents)
 # =============================================================================
@@ -424,14 +429,14 @@ def run_training_pipeline(set_progress):
 
     set_progress(f"Training Model A (pace × efficiency) on {len(train)} games with {sampler} NUTS...")
     idata_a = models.sample(models.model_a(train, tot_std, mar_std, center), DRAWS, TUNE, CHAINS, TRAIN_SEED, NUTS_SAMPLER)
-    models.save_idata(idata_a, str(STATE_DIR / "model_a.nc"))
+    models.save_idata(idata_a, str(model_path("a")))
     set_progress(f"Training Model B (team strength, {len(index['keys'])} team-seasons)...")
     idata_b = models.sample(models.model_b(train, index), DRAWS, TUNE, CHAINS, TRAIN_SEED + 1, NUTS_SAMPLER)
-    models.save_idata(idata_b, str(STATE_DIR / "model_b.nc"))
+    models.save_idata(idata_b, str(model_path("b")))
     set_progress(f"Training Model C (market-anchored) on {len(train_c)} games with lines"
                  + (" — priors only until graded lines exist" if train_c.empty else "") + "...")
     idata_c = models.sample(models.model_c(train_c, tot_std, mar_std), DRAWS, TUNE, CHAINS, TRAIN_SEED + 2, NUTS_SAMPLER)
-    models.save_idata(idata_c, str(STATE_DIR / "model_c.nc"))
+    models.save_idata(idata_c, str(model_path("c")))
 
     with open(BUNDLE_PATH, "wb") as f:
         pickle.dump({"prior": prior, "tot_std": tot_std.get_state(), "mar_std": mar_std.get_state(),
@@ -508,7 +513,7 @@ def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, de
     n_particles = _clean(n_particles, core.BPS_DEFAULTS["particles"], 50, 20000, int)
     delta = _clean(delta, core.BPS_DEFAULTS["delta"], 0.5, 1.0)
     beta = _clean(beta, core.BPS_DEFAULTS["beta"], 0.5, 1.0)
-    if not BUNDLE_PATH.exists():
+    if not BUNDLE_PATH.exists() or not all(model_path(k).exists() for k in "abc"):
         raise RuntimeError("No trained models yet. Run step 1 first.")
     with open(BUNDLE_PATH, "rb") as f:
         bundle = pickle.load(f)
@@ -538,9 +543,9 @@ def run_predictions_pipeline(set_progress, game_date, n_samples, n_particles, de
     rng = np.random.default_rng(BPS_SEED + int(pd.Timestamp(target).strftime("%Y%m%d")))
     set_progress(f"Forecasting {len(slate)} games on {target} with Models A, B and C...")
     draws = {
-        "A": models.predict_a(az.from_netcdf(str(STATE_DIR / "model_a.nc")), slate, tot_std, mar_std, bundle["center"], rng),
-        "B": models.predict_b(az.from_netcdf(str(STATE_DIR / "model_b.nc")), slate, bundle["index"], rng),
-        "C": models.predict_c(az.from_netcdf(str(STATE_DIR / "model_c.nc")), slate, tot_std, mar_std, rng),
+        "A": models.predict_a(load_idata("a"), slate, tot_std, mar_std, bundle["center"], rng),
+        "B": models.predict_b(load_idata("b"), slate, bundle["index"], rng),
+        "C": models.predict_c(load_idata("c"), slate, tot_std, mar_std, rng),
     }
     out = slate[["game_id", "game_date", "season", "home_team", "away_team", "line_total", "line_spread_home",
                  "line_implied_home_margin", "over_price", "under_price", "best_over_price", "best_under_price",
@@ -1261,14 +1266,14 @@ _IDATA_CACHE: dict = {}
 
 
 def load_idata(key):
-    path = STATE_DIR / f"model_{key}.nc"
+    path = model_path(key)
     if not path.exists():
         return None
     mtime = path.stat().st_mtime
     hit = _IDATA_CACHE.get(key)
     if hit is not None and hit[0] == mtime:
         return hit[1]
-    idata = az.from_netcdf(str(path))
+    idata = models.read_idata(str(path))
     _IDATA_CACHE[key] = (mtime, idata)
     return idata
 
@@ -1339,7 +1344,7 @@ def model_diagnostics(key):
     idata = load_idata(key)
     if idata is None:
         return None
-    mtime = (STATE_DIR / f"model_{key}.nc").stat().st_mtime
+    mtime = model_path(key).stat().st_mtime
     if _DIAG_CACHE.get(key, (None,))[0] == mtime:
         return _DIAG_CACHE[key][1]
     rhat = _diag_stat(az.rhat, idata)

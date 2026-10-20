@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import os
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -323,17 +324,29 @@ def _clean_dataset(ds, group: str):
 
 
 def save_idata(idata, path: str) -> None:
-    """Write the groups the dashboard reads, one netCDF group each, with plain string names and
-    attributes. Writing the groups directly (rather than through ArviZ) sidesteps what some
-    ArviZ / nutpie / xarray version combinations put in the trace: dict attributes such as
-    nutpie's settings, and tuple variable names. Readable by az.from_netcdf in ArviZ 0.x and 1.x."""
+    """Pickle the groups the dashboard reads (posterior, sample_stats, observed_data, constant_data) as
+    plain xarray Datasets with string names and attributes. Pickle instead of netCDF because netCDF
+    rejects names or attributes that some ArviZ / nutpie / xarray / netCDF-library combinations
+    produce (dict attributes, tuple names, characters the bundled netCDF library won't accept)."""
     if hasattr(idata, "children"):   # ArviZ 1.x DataTree
         groups = {g: idata[g].to_dataset() for g in SAVED_GROUPS if g in idata.children}
     else:                            # ArviZ 0.x InferenceData
         groups = {g: getattr(idata, g) for g in SAVED_GROUPS if g in idata.groups()}
     if "posterior" not in groups:
         raise ValueError("The sampler returned no posterior to save.")
-    if os.path.exists(path):
-        os.remove(path)
-    for i, (g, ds) in enumerate(groups.items()):
-        _clean_dataset(ds, g).to_netcdf(path, group=g, mode="w" if i == 0 else "a")
+    clean = {g: _clean_dataset(ds, g) for g, ds in groups.items()}
+    tmp = f"{path}.tmp"
+    with open(tmp, "wb") as f:
+        pickle.dump(clean, f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)   # a half-written file never replaces a good one
+
+
+def read_idata(path: str):
+    """What save_idata wrote, as the installed ArviZ's own type: InferenceData on 0.x, DataTree on 1.x."""
+    import arviz as az
+    import xarray as xr
+    with open(path, "rb") as f:
+        groups = pickle.load(f)
+    if int(az.__version__.split(".")[0]) < 1:
+        return az.InferenceData(**groups)
+    return xr.DataTree.from_dict(groups)
