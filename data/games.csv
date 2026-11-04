@@ -120,3 +120,5 @@ game_id,season,game_type,game_date,tipoff_utc,home_team_abbreviation,away_team_a
 401909933,2026-27,regular,2026-11-04,2026-11-05T02:30Z,SAS,DAL,1,,,,,False
 401909934,2026-27,regular,2026-11-04,2026-11-05T03:00Z,SAC,LAL,1,,,,,False
 401909935,2026-27,regular,2026-11-04,2026-11-05T03:30Z,LAC,MIA,1,,,,,False
+401909936,2026-27,regular,2026-11-05,2026-11-06T02:00Z,PHX,ORL,1,,,,,False
+401909937,2026-27,regular,2026-11-05,2026-11-06T03:00Z,GSW,MIA,1,,,,,False
